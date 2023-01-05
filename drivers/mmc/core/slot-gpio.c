@@ -85,6 +85,7 @@ int mmc_gpio_get_cd(struct mmc_host *host)
 }
 EXPORT_SYMBOL(mmc_gpio_get_cd);
 
+/* 配置卡检测方式是中断还是轮询 */
 void mmc_gpiod_request_cd_irq(struct mmc_host *host)
 {
 	struct mmc_gpio *ctx = host->slot.handler_priv;
@@ -98,9 +99,10 @@ void mmc_gpiod_request_cd_irq(struct mmc_host *host)
 	 * Do not use IRQ if the platform prefers to poll, e.g., because that
 	 * IRQ number is already used by another unit and cannot be shared.
 	 */
+	/* 通过cd_gpio编号获取对应的irq中断号 */
 	if (!(host->caps & MMC_CAP_NEEDS_POLL))
 		irq = gpiod_to_irq(ctx->cd_gpio);
-
+	/* 中断号有效，获取中断thread并配置中断触发方式：单次，RISING或FALLING边沿触发 */
 	if (irq >= 0) {
 		if (!ctx->cd_gpio_isr)
 			ctx->cd_gpio_isr = mmc_gpio_cd_irqt;
@@ -114,6 +116,7 @@ void mmc_gpiod_request_cd_irq(struct mmc_host *host)
 
 	host->slot.cd_irq = irq;
 
+	/* 中断号无效，使用轮询检测 */
 	if (irq < 0)
 		host->caps |= MMC_CAP_NEEDS_POLL;
 }

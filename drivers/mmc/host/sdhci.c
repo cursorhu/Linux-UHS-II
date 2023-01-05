@@ -4071,7 +4071,9 @@ EXPORT_SYMBOL_GPL(sdhci_cqe_irq);
  * Device allocation/registration                                            *
  *                                                                           *
 \*****************************************************************************/
-
+/* 功能：在mmc/host层分配sdhci_host，本质是mmc_alloc_host在底层的更具体实现 
+   调用者示例：sdhci_pci_probe_slot
+*/
 struct sdhci_host *sdhci_alloc_host(struct device *dev,
 	size_t priv_size)
 {
@@ -4079,16 +4081,25 @@ struct sdhci_host *sdhci_alloc_host(struct device *dev,
 	struct sdhci_host *host;
 
 	WARN_ON(dev == NULL);
-
+	/* 
+	参考mmc_alloc_host的注释，“mmc_host + sdhci_host + priv_size” 是整个host数据结构的layout, priv_size可以是递归的子结构
+	 */
 	mmc = mmc_alloc_host(sizeof(struct sdhci_host) + priv_size, dev);
 	if (!mmc)
 		return ERR_PTR(-ENOMEM);
-
+	/* 
+	mmc_priv获取mmc结构之后的private结构sdhci_host,
+	为什么mmc的尾部即sdhci_host的开始？因为“mmc_host + sdhci_host + priv_size” 是整个host数据结构的layout
+ 	*/
 	host = mmc_priv(mmc);
+	/* 关联上层mmc */
 	host->mmc = mmc;
+	/* 绑定sdhci_ops实现的各种sdhci operations回调 */
 	host->mmc_host_ops = sdhci_ops;
+	/* 关联上层mmc */
 	mmc->ops = &host->mmc_host_ops;
 
+	/* 以下都是sdhci_host的一些默认初始化配置 */
 	host->flags = SDHCI_SIGNALING_330;
 
 	host->cqe_ier     = SDHCI_CQE_INT_MASK;

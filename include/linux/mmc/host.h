@@ -18,6 +18,8 @@
 #include <linux/blk-crypto-profile.h>
 #include <linux/mmc/sd_uhs2.h>
 
+/* 定义mmc host和card之间的I/O接口的参数，主要包括时钟频率、电源、总线模式和带宽、信号电压
+通过mmc_host_ops->set_ios方法设置 */
 struct mmc_ios {
 	unsigned int	clock;			/* clock rate */
 	unsigned short	vdd;

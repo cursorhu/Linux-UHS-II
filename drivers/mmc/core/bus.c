@@ -28,6 +28,12 @@
 
 #define to_mmc_driver(d)	container_of(d, struct mmc_driver, drv)
 
+/* DEVICE_ATTR用于在sysfs显示设备的属性
+参考：https://www.jianshu.com/p/b923a5326e69
+https://www.cnblogs.com/yikoulinux/p/15841343.html */
+
+/* 属性的标准操作函数是show和store, 属性名叫type所以默认函数叫type_show */ 
+/* sysfs_emit在sysfs的设备目录创建属性文件，用户态可以访问 */
 static ssize_t type_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
@@ -46,14 +52,15 @@ static ssize_t type_show(struct device *dev,
 		return -EFAULT;
 	}
 }
-static DEVICE_ATTR_RO(type);
-
+static DEVICE_ATTR_RO(type); //创建属性名为type，默认方法是type_show
+/* 定义mmc_dev属性，其中属性名为type */
 static struct attribute *mmc_dev_attrs[] = {
-	&dev_attr_type.attr,
+	&dev_attr_type.attr, //这里格式是dev_attr_属性名，所以是dev_attr_type
 	NULL,
 };
-ATTRIBUTE_GROUPS(mmc_dev);
+ATTRIBUTE_GROUPS(mmc_dev); //注册mmc_dev
 
+/* 对应用层udev、mdev提供MMC_TYPE，MMC_NAME等event类型的响应 */
 static int
 mmc_bus_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
@@ -214,13 +221,26 @@ static const struct dev_pm_ops mmc_bus_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(mmc_bus_suspend, mmc_bus_resume)
 };
 
+/* 定义mmc bus的属性和操作，bus的本质就是host对card操作的集合，因此可以理解bus主要属于card的范畴，只不过bus也关联host */
 static struct bus_type mmc_bus_type = {
+	/* bus是mmc */
 	.name		= "mmc",
+	/* mmc_dev_groups内部包含mmc_dev_attrs属性 */
 	.dev_groups	= mmc_dev_groups,
+	/* 没有.match接口是因为默认由mmc子系统实现的mmc driver匹配注册至mmc bus上的mmc card，不需在此定义.match */
+
+	/* 添加该mmc bus的uevent参数:
+	在调用device_add时，会调用kobject_uevent向应用层发送设备添加相关的事件,
+	而kobject_uevent会调用该device所属bus和class的uevent接口，添加需要发送到应用的event参数 */
 	.uevent		= mmc_bus_uevent,
+
+	/* mmc card与mmc driver匹配成功后，会调用driver的probe进行探测初始化操作 */
 	.probe		= mmc_bus_probe,
+	/* mmc card与mmc driver解绑时，调用driver的remove进行注销操作 */
 	.remove		= mmc_bus_remove,
+	/* 调用driver和bus_ops的shutdown进行卡设备和bus掉电 */
 	.shutdown	= mmc_bus_shutdown,
+	/* mmc_bus本身的电源管理 */
 	.pm		= &mmc_bus_pm_ops,
 };
 
@@ -272,6 +292,8 @@ static void mmc_release_card(struct device *dev)
 /*
  * Allocate and initialise a new MMC card structure.
  */
+/* 分配mmc_host相关的唯一卡数据结构mmc_card
+流程和mmc_host分配流程类似，主要是卡结构的内存分配和卡设备注册 */
 struct mmc_card *mmc_alloc_card(struct mmc_host *host, struct device_type *type)
 {
 	struct mmc_card *card;
@@ -285,6 +307,7 @@ struct mmc_card *mmc_alloc_card(struct mmc_host *host, struct device_type *type)
 	device_initialize(&card->dev);
 
 	card->dev.parent = mmc_classdev(host);
+	/* 在此关联card和bus */
 	card->dev.bus = &mmc_bus_type;
 	card->dev.release = mmc_release_card;
 	card->dev.type = type;
@@ -295,6 +318,8 @@ struct mmc_card *mmc_alloc_card(struct mmc_host *host, struct device_type *type)
 /*
  * Register a new MMC card with the driver model.
  */
+/* 卡设备注册到内核设备模型, 完成bus-driver-device模型中的bus-device关联
+流程和mmc_host的设备注册流程类似，核心函数是device_add */
 int mmc_add_card(struct mmc_card *card)
 {
 	int ret;
@@ -372,6 +397,10 @@ int mmc_add_card(struct mmc_card *card)
 
 	device_enable_async_suspend(&card->dev);
 
+	/* 老版本是使用device_register完成设备注册，
+	device_register内部是device_initialize()和device_add()，这里使用device_add即可完成完成设备注册 
+	参考：https://deepinout.com/linux-kernel-api/device-driver-and-device-management/linux-kernel-api-device_register.html
+	*/
 	ret = device_add(&card->dev);
 	if (ret)
 		return ret;
@@ -385,6 +414,7 @@ int mmc_add_card(struct mmc_card *card)
  * Unregister a new MMC card with the driver model, and
  * (eventually) free it.
  */
+/* 注销driver model中的卡设备，核心函数是device_del和put_device */
 void mmc_remove_card(struct mmc_card *card)
 {
 	struct mmc_host *host = card->host;

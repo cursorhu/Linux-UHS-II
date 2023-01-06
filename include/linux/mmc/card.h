@@ -289,6 +289,8 @@ struct mmc_queue_req;
 /*
  * MMC Physical partitions
  */
+/* 描述mmc card的分区属性，主要包括分区大小、分区的类型、分区名称、是否为只读分区等信息
+mmc card的extended CSD寄存器中存储分区信息，当mmc_rescan查找到mmc card时，会读取该寄存器的值获取mmc card的分区信息 */
 struct mmc_part {
 	u64		size;	/* partition size (in bytes) */
 	unsigned int	part_cfg;	/* partition type */
@@ -304,6 +306,7 @@ struct mmc_part {
 /*
  * MMC device
  */
+/* 记录卡的属性，核心内容是卡的寄存器信息，如cid、csd、scr、ssr（mmc_rescan时从mmc card中读取） */
 struct mmc_card {
 	struct mmc_host		*host;		/* the host this device belongs to */
 	struct device		dev;		/* the device */

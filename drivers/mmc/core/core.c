@@ -259,6 +259,7 @@ static void __mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 	if (host->cqe_on)
 		host->cqe_ops->cqe_off(host);
 
+	/* 执行下层的具体request回调，例如host/sdhci实现的sdhci_request */
 	host->ops->request(host, mrq);
 }
 
@@ -333,6 +334,8 @@ static int mmc_mrq_prep(struct mmc_host *host, struct mmc_request *mrq)
 	return 0;
 }
 
+/* 功能：mmc_host层的请求发送方法
+调用者：上层的block.c的mmc_blk_mq_issue_rw_rq */
 int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 {
 	struct uhs2_command uhs2_cmd;
@@ -350,10 +353,12 @@ int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 
 	WARN_ON(!host->claimed);
 
+	/* 先准备好mrq内的cmd, data字段 */
 	err = mmc_mrq_prep(host, mrq);
 	if (err)
 		return err;
 
+	/* 对于UHS2, prepare cmd的方式不太一样 */
 	if (host->card) {
 		if (host->card->uhs2_state & MMC_UHS2_INITIALIZED) {
 			uhs2_cmd.payload = payload;
@@ -369,6 +374,7 @@ int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 	}
 
 	led_trigger_event(host->led, LED_FULL);
+	/* 真正执行host的请求发送 */
 	__mmc_start_request(host, mrq);
 
 	return 0;

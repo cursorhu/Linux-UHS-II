@@ -71,12 +71,20 @@ struct mmc_queue_req {
 	int			retries;
 };
 
+/* mmc_queue将块设备I/O的请求转换成mmc层的请求，注意mmc_queue不是直接发给卡的请求 */
 struct mmc_queue {
 	struct mmc_card		*card;
 	struct mmc_ctx		ctx;
 	struct blk_mq_tag_set	tag_set;
+
+	/* mmc_blk_data是mmc_queue结构中真正要传输的数据，其他部分都是各种附加信息
+	参考mmc_blk_mq_issue_rq */
 	struct mmc_blk_data	*blkdata;
+
+	/* 向上关联，指向mmc_queue的队列，
+	参考mmc_blk_mq_req_done, request_queue的queuedata即为mmc_queue */
 	struct request_queue	*queue;
+
 	spinlock_t		lock;
 	int			in_flight[MMC_ISSUE_MAX];
 	unsigned int		cqe_busy;

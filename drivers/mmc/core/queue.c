@@ -48,6 +48,7 @@ static enum mmc_issue_type mmc_cqe_issue_type(struct mmc_host *host,
 	case REQ_OP_DRV_OUT:
 	case REQ_OP_DISCARD:
 	case REQ_OP_SECURE_ERASE:
+	case REQ_OP_WRITE_ZEROES:
 		return MMC_ISSUE_SYNC;
 	case REQ_OP_FLUSH:
 		return mmc_cqe_can_dcmd(host) ? MMC_ISSUE_DCMD : MMC_ISSUE_SYNC;
@@ -223,8 +224,6 @@ static void mmc_mq_exit_request(struct blk_mq_tag_set *set, struct request *req,
 	mq_rq->sg = NULL;
 }
 
-/* 功能：转发上层的I/O request到mmc的block层处理
-调用者：mmc_mq_ops */
 static blk_status_t mmc_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
 				    const struct blk_mq_queue_data *bd)
 {
@@ -306,7 +305,6 @@ static blk_status_t mmc_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 	blk_mq_start_request(req);
 
-	/* 关键函数：请求转发到block层 */
 	issued = mmc_blk_mq_issue_rq(mq, req);
 
 	switch (issued) {
@@ -420,7 +418,6 @@ struct gendisk *mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card)
 	spin_lock_init(&mq->lock);
 
 	memset(&mq->tag_set, 0, sizeof(mq->tag_set));
-	/* 这里注册mmc_mq_ops */
 	mq->tag_set.ops = &mmc_mq_ops;
 	/*
 	 * The queue depth for CQE must match the hardware because the request
@@ -453,7 +450,7 @@ struct gendisk *mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card)
 	if (ret)
 		return ERR_PTR(ret);
 		
-	/* 这里关联到disk层 */
+
 	disk = blk_mq_alloc_disk(&mq->tag_set, mq);
 	if (IS_ERR(disk)) {
 		blk_mq_free_tag_set(&mq->tag_set);

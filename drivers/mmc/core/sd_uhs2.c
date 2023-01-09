@@ -897,7 +897,7 @@ static int sd_uhs2_legacy_init(struct mmc_host *host, struct mmc_card *card)
 	u32 cid[4];
 	u32 ocr;
 	u32 rocr;
-	u8  status[64];
+	u8  *status;
 	int ro;
 
 	/* Send CMD0 to reset SD card */
@@ -986,6 +986,10 @@ static int sd_uhs2_legacy_init(struct mmc_host *host, struct mmc_card *card)
 	 * Even switch failed, sd card can still work at lower power consumption mode, but
 	 * performance will be lower than high power consumption mode.
 	 */
+	status = kmalloc(64, GFP_KERNEL);
+	if (!status)
+		return -ENOMEM;
+
 	if (!(card->csd.cmdclass & CCC_SWITCH)) {
 		pr_warn("%s: card lacks mandatory switch function, performance might suffer\n",
 			mmc_hostname(card->host));
@@ -1013,6 +1017,8 @@ static int sd_uhs2_legacy_init(struct mmc_host *host, struct mmc_card *card)
 	 * NOTE:
 	 * Should we read Externsion Register to check power notification feature here?
 	 */
+
+	kfree(status);
 
 	return 0;
 }

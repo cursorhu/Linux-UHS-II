@@ -273,9 +273,6 @@ EXPORT_SYMBOL(mmc_of_parse_clk_phase);
  * parse the properties and set respective generic mmc-host flags and
  * parameters.
  */
-/* 从读取mmc设备树节点的属性对应的flags值, 存储到mmc_host数据结构 
-设备树参考：arch/arm/boot/dts
-*/
 int mmc_of_parse(struct mmc_host *host)
 {
 	struct device *dev = host->parent;
@@ -522,33 +519,19 @@ static int mmc_first_nonreserved_index(void)
  *
  *	Initialise the per-host structure.
  */
-/* 
-功能：mmc_alloc_host 分配了一个描述 mmc controller 的数据结构：mmc_host 
-	extra是用于mmc下层框架的数据结构大小，参考sdhci_alloc_host中调用mmc_alloc_host，extra即为sdhci_host的大小
-	也就是说，kzalloc分配的内存layout是 mmc_host + sdhci_host + 更下层的数据结构...
-调用者：sdhci_alloc_host
-*/
 struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 {
 	int index;
 	struct mmc_host *host;
 	int alias_id, min_idx, max_idx;
-	/* 
-	内核分配内存的三种API: kmalloc(), kzalloc(), vmalloc()
-	kmalloc: 分配的内存物理地址连续，但大小不能超过128KB，被DMA访问的内存必须连续；kmalloc比vmalloc速度快，使用频率高
-	kzalloc: 在kmalloc基础上对做内存清零的初始化
-	vmalloc: 分配的虚拟内存地址连续，物理地址不连续；虚拟内存没有最大空间限制，因此申请较大的内存空间用此函数
-	 */
+
 	host = kzalloc(sizeof(struct mmc_host) + extra, GFP_KERNEL);
 	if (!host)
 		return NULL;
 
 	/* scanning will be enabled when we're ready */
 	host->rescan_disable = 1;
-	/* 
-	of_alias_get_id 获取设备树中名为"mmc"设备的对应节点id(数字0,1,...)，用于区分多个mmc设备
-	参考：https://www.cnblogs.com/pengdonglin137/p/5252348.html
-	 */
+
 	alias_id = of_alias_get_id(dev->of_node, "mmc");
 	if (alias_id >= 0) {
 		index = alias_id;
@@ -563,53 +546,32 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 		}
 	}
 
-	/* 这里根据设备id设置具体的mmc设备名，在文件系统可以看到/dev/mmcX, X=0,1,.. */
 	host->index = index;
+
 	dev_set_name(&host->class_dev, "mmc%d", host->index);
 	host->ws = wakeup_source_register(NULL, dev_name(&host->class_dev));
 
-	/* struct device dev是抽象的逻辑设备，struct device	class_dev是mmc_host里具体的设备 */
 	host->parent = dev;
 	host->class_dev.parent = dev;
 	host->class_dev.class = &mmc_host_class;
-	/* 
-	device_initialize是Kernel API, 向内核注册逻辑设备host->class_dev.
-	将此host->class_dev和内核数据结构device_kset及kobj_type相关联
-	设备mmc_host的内存释放由引用计数mmc_host->class_dev.kobject.kref决定，
-	当引用计数为0时，内核调用kobject->kobj_type->release接口进行设备释放，最终调用到mmc_host_class->dev_release函数，实现mmc_host设备的释放 
-	参考：https://deepinout.com/linux-kernel-api/device-driver-and-device-management/linux-kernel-api-device_initialize.html
-	*/
 	device_initialize(&host->class_dev);
-	/* 使能mmc_host设备的power mode相关的suspend/resume功能 */
 	device_enable_async_suspend(&host->class_dev);
 
-	/* 为host分配相关联的mmc_gpio结构 */
 	if (mmc_gpio_alloc(host)) {
 		put_device(&host->class_dev);
 		return NULL;
 	}
 
-	/* 初始化host可用的spinlock, waitqueue */
 	spin_lock_init(&host->lock);
 	init_waitqueue_head(&host->wq);
-	/* 
-	INIT_DELAYED_WORK将host->detect方法绑定为mmc_rescan回调函数
-	mmc_rescan是mmc/sd卡的检测入口，有中断和轮询两种检测方式：
-	若该mmc_host支持卡的在位检测（一般通过cd引脚检测，并配置成中断模式），
-	则在中断处理函数中(sdhci_irq的下半部sdhci_thread_irq中)调用mmc_detect_change，唤醒该延迟工作队列，调用回调mmc_rescan实现卡的检测和初始化；
-	若mmc_host不支持卡的在位检测功能（即不存在cd引脚检测），则将mmc_host设置为poll模式，
-	在poll模式下，在执行mmc_add_host时执行一次mmc_rescan，在mmc_rescan的结尾根据该poll模式，设置延迟调度该队列的时间为1s，延迟工作队列以1s为周期进行卡的rescan
-	*/
 	INIT_DELAYED_WORK(&host->detect, mmc_rescan);
 	INIT_WORK(&host->sdio_irq_work, sdio_irq_work);
-	/* 初始化host的timer, 即host内的struct timer_list */
 	timer_setup(&host->retune_timer, mmc_retune_timer, 0);
 
 	/*
 	 * By default, hosts do not support SGIO or large requests.
 	 * They have to set these according to their abilities.
 	 */
-	/* 设置mmc类存储设备的block, segment属性 */
 	host->max_segs = 1;
 	host->max_seg_size = PAGE_SIZE;
 
@@ -653,19 +615,14 @@ static int mmc_validate_host_caps(struct mmc_host *host)
  *	prepared to start servicing requests before this function
  *	completes.
  */
-/* 
-功能：将mmc_host对应的class_dev注册至系统的device_kset中，并完成与mmc_host_class的关联
-调用者：sdhci_add_host
- */
 int mmc_add_host(struct mmc_host *host)
 {
 	int err;
-	/* 查看host支持的能力capability */
+
 	err = mmc_validate_host_caps(host);
 	if (err)
 		return err;
-	/* device_add将逻辑设备加到Linux内核系统的设备驱动程序模型中, 在/dev目录下创建与逻辑类对应的设备文件
-	参考：https://deepinout.com/linux-kernel-api/device-driver-and-device-management/linux-kernel-api-device_add.html */
+
 	err = device_add(&host->class_dev);
 	if (err)
 		return err;
@@ -675,7 +632,7 @@ int mmc_add_host(struct mmc_host *host)
 #ifdef CONFIG_DEBUG_FS
 	mmc_add_host_debugfs(host);
 #endif
-	/* 启动host，执行一次rescan */
+
 	mmc_start_host(host);
 	return 0;
 }
@@ -690,22 +647,14 @@ EXPORT_SYMBOL(mmc_add_host);
  *	and power down the MMC bus. No new requests will be issued
  *	after this function has returned.
  */
-/* 
-功能：注销mmc_host数据结构在上下层的联系
-调用者：sdhci_remove_host
-*/
 void mmc_remove_host(struct mmc_host *host)
 {
-	/* mmc_start_host对应的mmc_stop_host
-	释放host bus相关的数据结构, 并power off */
 	mmc_stop_host(host);
 
 #ifdef CONFIG_DEBUG_FS
 	mmc_remove_host_debugfs(host);
 #endif
-	/* device_add对应的device_del 
-	kernel会调用mmc_host_class的dev_release接口，释放mmc_host对应的动态内存
-	*/
+
 	device_del(&host->class_dev);
 
 	led_trigger_unregister_simple(host->led);
@@ -719,15 +668,9 @@ EXPORT_SYMBOL(mmc_remove_host);
  *
  *	Free the host once all references to it have been dropped.
  */
-
-/* 
-功能：mmc_host引用计数-1，如果变为0就释放内存
-调用者：sdhci_free_host，可以参考sdhci_pci_remove_slot，在remove_host之后执行free_host彻底释放
-*/
 void mmc_free_host(struct mmc_host *host)
 {
 	mmc_pwrseq_free(host);
-	/* put_device()减少逻辑设备的引用计数, dev->kobj.kref.refcount */
 	put_device(&host->class_dev);
 }
 

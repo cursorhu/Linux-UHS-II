@@ -47,6 +47,8 @@
 static unsigned int debug_quirks = 0;
 static unsigned int debug_quirks2;
 
+static bool sdhci_send_command(struct sdhci_host *host, struct mmc_command *cmd);
+
 void sdhci_dumpregs(struct sdhci_host *host)
 {
 	SDHCI_DUMP("============ SDHCI REGISTER DUMP ===========\n");
@@ -184,23 +186,21 @@ static void sdhci_disable_card_detection(struct sdhci_host *host)
 	sdhci_set_card_detection(host, false);
 }
 
-void sdhci_runtime_pm_bus_on(struct sdhci_host *host)
+static void sdhci_runtime_pm_bus_on(struct sdhci_host *host)
 {
 	if (host->bus_on)
 		return;
 	host->bus_on = true;
 	pm_runtime_get_noresume(mmc_dev(host->mmc));
 }
-EXPORT_SYMBOL_GPL(sdhci_runtime_pm_bus_on);
 
-void sdhci_runtime_pm_bus_off(struct sdhci_host *host)
+static void sdhci_runtime_pm_bus_off(struct sdhci_host *host)
 {
 	if (!host->bus_on)
 		return;
 	host->bus_on = false;
 	pm_runtime_put_noidle(mmc_dev(host->mmc));
 }
-EXPORT_SYMBOL_GPL(sdhci_runtime_pm_bus_off);
 
 void sdhci_reset(struct sdhci_host *host, u8 mask)
 {
@@ -246,7 +246,6 @@ void sdhci_clear_set_irqs(struct sdhci_host *host, u32 clear, u32 set)
 	sdhci_writel(host, ier, SDHCI_INT_ENABLE);
 	sdhci_writel(host, ier, SDHCI_SIGNAL_ENABLE);
 }
-EXPORT_SYMBOL_GPL(sdhci_clear_set_irqs);
 
 static bool sdhci_do_reset(struct sdhci_host *host, u8 mask)
 {
@@ -388,6 +387,7 @@ void sdhci_init(struct sdhci_host *host, int soft)
 	if (soft) {
 		/* force clock reconfiguration */
 		host->clock = 0;
+		host->reinit_uhs = true;
 		mmc->ops->set_ios(mmc, &mmc->ios);
 	}
 }
@@ -410,7 +410,7 @@ static void sdhci_reinit(struct sdhci_host *host)
 		mmc_detect_change(host->mmc, msecs_to_jiffies(200));
 }
 
-void __sdhci_led_activate(struct sdhci_host *host)
+static void __sdhci_led_activate(struct sdhci_host *host)
 {
 	u8 ctrl;
 
@@ -421,7 +421,6 @@ void __sdhci_led_activate(struct sdhci_host *host)
 	ctrl |= SDHCI_CTRL_LED;
 	sdhci_writeb(host, ctrl, SDHCI_HOST_CONTROL);
 }
-EXPORT_SYMBOL_GPL(__sdhci_led_activate);
 
 void __sdhci_led_deactivate(struct sdhci_host *host)
 {
@@ -1441,11 +1440,10 @@ static inline bool sdhci_auto_cmd23(struct sdhci_host *host,
 	return mrq->sbc && (host->flags & SDHCI_AUTO_CMD23);
 }
 
-bool sdhci_manual_cmd23(struct sdhci_host *host, struct mmc_request *mrq)
+static inline bool sdhci_manual_cmd23(struct sdhci_host *host, struct mmc_request *mrq)
 {
 	return mrq->sbc && !(host->flags & SDHCI_AUTO_CMD23);
 }
-EXPORT_SYMBOL_GPL(sdhci_manual_cmd23);
 
 static inline void sdhci_auto_cmd_select(struct sdhci_host *host,
 					 struct mmc_command *cmd,
@@ -1673,13 +1671,12 @@ static void __sdhci_finish_data(struct sdhci_host *host, bool sw_data_timeout)
 	}
 }
 
-void sdhci_finish_data(struct sdhci_host *host)
+static void sdhci_finish_data(struct sdhci_host *host)
 {
 	__sdhci_finish_data(host, false);
 }
-EXPORT_SYMBOL_GPL(sdhci_finish_data);
 
-bool sdhci_send_command(struct sdhci_host *host, struct mmc_command *cmd)
+static bool sdhci_send_command(struct sdhci_host *host, struct mmc_command *cmd)
 {
 	int flags;
 	u32 mask;
@@ -1770,7 +1767,6 @@ bool sdhci_send_command(struct sdhci_host *host, struct mmc_command *cmd)
 
 	return true;
 }
-EXPORT_SYMBOL_GPL(sdhci_send_command);
 
 bool sdhci_present_error(struct sdhci_host *host,
 			 struct mmc_command *cmd, bool present)
@@ -1846,7 +1842,7 @@ static void sdhci_read_rsp_136(struct sdhci_host *host, struct mmc_command *cmd)
 	}
 }
 
-void sdhci_finish_command(struct sdhci_host *host)
+static void sdhci_finish_command(struct sdhci_host *host)
 {
 	struct mmc_command *cmd = host->cmd;
 
@@ -1899,7 +1895,6 @@ void sdhci_finish_command(struct sdhci_host *host)
 			__sdhci_finish_mrq(host, cmd->mrq);
 	}
 }
-EXPORT_SYMBOL_GPL(sdhci_finish_command);
 
 static u16 sdhci_get_preset_value(struct sdhci_host *host)
 {
@@ -2350,6 +2345,37 @@ void sdhci_set_uhs_signaling(struct sdhci_host *host, unsigned timing)
 }
 EXPORT_SYMBOL_GPL(sdhci_set_uhs_signaling);
 
+static bool sdhci_timing_has_preset(unsigned char timing)
+{
+	switch (timing) {
+	case MMC_TIMING_UHS_SDR12:
+	case MMC_TIMING_UHS_SDR25:
+	case MMC_TIMING_UHS_SDR50:
+	case MMC_TIMING_UHS_SDR104:
+	case MMC_TIMING_UHS_DDR50:
+	case MMC_TIMING_MMC_DDR52:
+		return true;
+	};
+	return false;
+}
+
+static bool sdhci_preset_needed(struct sdhci_host *host, unsigned char timing)
+{
+	return !(host->quirks2 & SDHCI_QUIRK2_PRESET_VALUE_BROKEN) &&
+	       sdhci_timing_has_preset(timing);
+}
+
+static bool sdhci_presetable_values_change(struct sdhci_host *host, struct mmc_ios *ios)
+{
+	/*
+	 * Preset Values are: Driver Strength, Clock Generator and SDCLK/RCLK
+	 * Frequency. Check if preset values need to be enabled, or the Driver
+	 * Strength needs updating. Note, clock changes are handled separately.
+	 */
+	return !host->preset_enabled &&
+	       (sdhci_preset_needed(host, ios->timing) || host->drv_type != ios->drv_type);
+}
+
 void sdhci_set_ios_common(struct mmc_host *mmc, struct mmc_ios *ios)
 {
 	struct sdhci_host *host = mmc_priv(mmc);
@@ -2395,7 +2421,11 @@ EXPORT_SYMBOL_GPL(sdhci_set_ios_common);
 void sdhci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 {
 	struct sdhci_host *host = mmc_priv(mmc);
+	bool reinit_uhs = host->reinit_uhs;
+	bool turning_on_clk = false;
 	u8 ctrl;
+
+	host->reinit_uhs = false;
 
 	if (ios->power_mode == MMC_POWER_UNDEFINED)
 		return;
@@ -2409,10 +2439,24 @@ void sdhci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 
 	sdhci_set_ios_common(mmc, ios);
 
+	if (!ios->clock || ios->clock != host->clock)
+		turning_on_clk = ios->clock && !host->clock;
+
 	if (host->ops->platform_send_init_74_clocks)
 		host->ops->platform_send_init_74_clocks(host, ios->power_mode);
 
 	host->ops->set_bus_width(host, ios->bus_width);
+
+	/*
+	 * Special case to avoid multiple clock changes during voltage
+	 * switching.
+	 */
+	if (!reinit_uhs &&
+	    turning_on_clk &&
+	    host->timing == ios->timing &&
+	    host->version >= SDHCI_SPEC_300 &&
+	    !sdhci_presetable_values_change(host, ios))
+		return;
 
 	ctrl = sdhci_readb(host, SDHCI_HOST_CONTROL);
 
@@ -2457,6 +2501,7 @@ void sdhci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 			}
 
 			sdhci_writew(host, ctrl_2, SDHCI_HOST_CONTROL2);
+			host->drv_type = ios->drv_type;
 		} else {
 			/*
 			 * According to SDHC Spec v3.00, if the Preset Value
@@ -2484,19 +2529,14 @@ void sdhci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		host->ops->set_uhs_signaling(host, ios->timing);
 		host->timing = ios->timing;
 
-		if (!(host->quirks2 & SDHCI_QUIRK2_PRESET_VALUE_BROKEN) &&
-				((ios->timing == MMC_TIMING_UHS_SDR12) ||
-				 (ios->timing == MMC_TIMING_UHS_SDR25) ||
-				 (ios->timing == MMC_TIMING_UHS_SDR50) ||
-				 (ios->timing == MMC_TIMING_UHS_SDR104) ||
-				 (ios->timing == MMC_TIMING_UHS_DDR50) ||
-				 (ios->timing == MMC_TIMING_MMC_DDR52))) {
+		if (sdhci_preset_needed(host, ios->timing)) {
 			u16 preset;
 
 			sdhci_enable_preset_value(host, true);
 			preset = sdhci_get_preset_value(host);
 			ios->drv_type = FIELD_GET(SDHCI_PRESET_DRV_MASK,
 						  preset);
+			host->drv_type = ios->drv_type;
 		}
 
 		/* Re-enable SD Clock */
@@ -3159,7 +3199,7 @@ void sdhci_request_done_dma(struct sdhci_host *host, struct mmc_request *mrq)
 }
 EXPORT_SYMBOL_GPL(sdhci_request_done_dma);
 
-bool sdhci_request_done(struct sdhci_host *host)
+static bool sdhci_request_done(struct sdhci_host *host)
 {
 	unsigned long flags;
 	struct mmc_request *mrq;
@@ -3237,9 +3277,8 @@ bool sdhci_request_done(struct sdhci_host *host)
 
 	return false;
 }
-EXPORT_SYMBOL_GPL(sdhci_request_done);
 
-static void sdhci_complete_work(struct work_struct *work)
+void sdhci_complete_work(struct work_struct *work)
 {
 	struct sdhci_host *host = container_of(work, struct sdhci_host,
 					       complete_work);
@@ -3247,6 +3286,7 @@ static void sdhci_complete_work(struct work_struct *work)
 	while (!sdhci_request_done(host))
 		;
 }
+EXPORT_SYMBOL_GPL(sdhci_complete_work);
 
 void sdhci_timeout_timer(struct timer_list *t)
 {
@@ -3709,7 +3749,7 @@ out:
 }
 EXPORT_SYMBOL_GPL(sdhci_irq);
 
-static irqreturn_t sdhci_thread_irq(int irq, void *dev_id)
+irqreturn_t sdhci_thread_irq(int irq, void *dev_id)
 {
 	struct sdhci_host *host = dev_id;
 	struct mmc_command *cmd;
@@ -3739,6 +3779,7 @@ static irqreturn_t sdhci_thread_irq(int irq, void *dev_id)
 
 	return IRQ_HANDLED;
 }
+EXPORT_SYMBOL_GPL(sdhci_thread_irq);
 
 /*****************************************************************************\
  *                                                                           *
@@ -3846,6 +3887,7 @@ int sdhci_resume_host(struct sdhci_host *host)
 		sdhci_init(host, 0);
 		host->pwr = 0;
 		host->clock = 0;
+		host->reinit_uhs = true;
 		mmc->ops->set_ios(mmc, &mmc->ios);
 	} else {
 		sdhci_init(host, (mmc->pm_flags & MMC_PM_KEEP_POWER));
@@ -3908,6 +3950,7 @@ int sdhci_runtime_resume_host(struct sdhci_host *host, int soft_reset)
 		/* Force clock and power re-program */
 		host->pwr = 0;
 		host->clock = 0;
+		host->reinit_uhs = true;
 		mmc->ops->start_signal_voltage_switch(mmc, &mmc->ios);
 		mmc->ops->set_ios(mmc, &mmc->ios);
 
@@ -4071,9 +4114,7 @@ EXPORT_SYMBOL_GPL(sdhci_cqe_irq);
  * Device allocation/registration                                            *
  *                                                                           *
 \*****************************************************************************/
-/* 功能：在mmc/host层分配sdhci_host，本质是mmc_alloc_host在底层的更具体实现 
-   调用者示例：sdhci_pci_probe_slot
-*/
+
 struct sdhci_host *sdhci_alloc_host(struct device *dev,
 	size_t priv_size)
 {
@@ -4081,25 +4122,16 @@ struct sdhci_host *sdhci_alloc_host(struct device *dev,
 	struct sdhci_host *host;
 
 	WARN_ON(dev == NULL);
-	/* 
-	参考mmc_alloc_host的注释，“mmc_host + sdhci_host + priv_size” 是整个host数据结构的layout, priv_size可以是递归的子结构
-	 */
+
 	mmc = mmc_alloc_host(sizeof(struct sdhci_host) + priv_size, dev);
 	if (!mmc)
 		return ERR_PTR(-ENOMEM);
-	/* 
-	mmc_priv获取mmc结构之后的private结构sdhci_host,
-	为什么mmc的尾部即sdhci_host的开始？因为“mmc_host + sdhci_host + priv_size” 是整个host数据结构的layout
- 	*/
+
 	host = mmc_priv(mmc);
-	/* 关联上层mmc */
 	host->mmc = mmc;
-	/* 绑定sdhci_ops实现的各种sdhci operations回调 */
 	host->mmc_host_ops = sdhci_ops;
-	/* 关联上层mmc */
 	mmc->ops = &host->mmc_host_ops;
 
-	/* 以下都是sdhci_host的一些默认初始化配置 */
 	host->flags = SDHCI_SIGNALING_330;
 
 	host->cqe_ier     = SDHCI_CQE_INT_MASK;
@@ -4119,6 +4151,9 @@ struct sdhci_host *sdhci_alloc_host(struct device *dev,
 	host->max_adma = 65536;
 
 	host->max_timeout_count = 0xE;
+
+	host->complete_work_fn = sdhci_complete_work;
+	host->thread_irq_fn    = sdhci_thread_irq;
 
 	return host;
 }
@@ -4872,7 +4907,7 @@ int __sdhci_add_host(struct sdhci_host *host)
 	if (!host->complete_wq)
 		return -ENOMEM;
 
-	INIT_WORK(&host->complete_work, sdhci_complete_work);
+	INIT_WORK(&host->complete_work, host->complete_work_fn);
 
 	timer_setup(&host->timer, sdhci_timeout_timer, 0);
 	timer_setup(&host->data_timer, sdhci_timeout_data_timer, 0);
@@ -4881,7 +4916,7 @@ int __sdhci_add_host(struct sdhci_host *host)
 
 	sdhci_init(host, 0);
 
-	ret = request_threaded_irq(host->irq, sdhci_irq, sdhci_thread_irq,
+	ret = request_threaded_irq(host->irq, sdhci_irq, host->thread_irq_fn,
 				   IRQF_SHARED,	mmc_hostname(mmc), host);
 	if (ret) {
 		pr_err("%s: Failed to request IRQ %d: %d\n",

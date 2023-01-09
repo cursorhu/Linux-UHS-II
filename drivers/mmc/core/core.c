@@ -259,7 +259,6 @@ static void __mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 	if (host->cqe_on)
 		host->cqe_ops->cqe_off(host);
 
-	/* 执行下层的具体request回调，例如host/sdhci实现的sdhci_request */
 	host->ops->request(host, mrq);
 }
 
@@ -334,8 +333,6 @@ static int mmc_mrq_prep(struct mmc_host *host, struct mmc_request *mrq)
 	return 0;
 }
 
-/* 功能：mmc_host层的请求发送方法
-调用者：上层的block.c的mmc_blk_mq_issue_rw_rq */
 int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 {
 	struct uhs2_command uhs2_cmd;
@@ -353,20 +350,12 @@ int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 
 	WARN_ON(!host->claimed);
 
-	/* 先准备好mrq内的cmd, data字段 */
 	err = mmc_mrq_prep(host, mrq);
 	if (err)
 		return err;
 
-	/* 对于UHS2, prepare cmd的方式不太一样 */
 	if (host->card) {
 		if (host->card->uhs2_state & MMC_UHS2_INITIALIZED) {
-			uhs2_cmd.payload = payload;
-			mrq->cmd->uhs2_cmd = &uhs2_cmd;
-			mmc_uhs2_prepare_cmd(host, mrq);
-		}
-	} else {
-		if (host->flags & MMC_UHS2_INITIALIZED) {
 			uhs2_cmd.payload = payload;
 			mrq->cmd->uhs2_cmd = &uhs2_cmd;
 			mmc_uhs2_prepare_cmd(host, mrq);
@@ -374,7 +363,6 @@ int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 	}
 
 	led_trigger_event(host->led, LED_FULL);
-	/* 真正执行host的请求发送 */
 	__mmc_start_request(host, mrq);
 
 	return 0;
@@ -477,12 +465,6 @@ int mmc_cqe_start_req(struct mmc_host *host, struct mmc_request *mrq)
 
 	if (host->card) {
 		if (host->card->uhs2_state & MMC_UHS2_INITIALIZED) {
-			uhs2_cmd.payload = payload;
-			mrq->cmd->uhs2_cmd = &uhs2_cmd;
-			mmc_uhs2_prepare_cmd(host, mrq);
-		}
-	} else {
-		if (host->flags & MMC_UHS2_INITIALIZED) {
 			uhs2_cmd.payload = payload;
 			mrq->cmd->uhs2_cmd = &uhs2_cmd;
 			mmc_uhs2_prepare_cmd(host, mrq);
@@ -1172,7 +1154,13 @@ u32 mmc_select_voltage(struct mmc_host *host, u32 ocr)
 		mmc_power_cycle(host, ocr);
 	} else {
 		bit = fls(ocr) - 1;
-		ocr &= 3 << bit;
+		/*
+		 * The bit variable represents the highest voltage bit set in
+		 * the OCR register.
+		 * To keep a range of 2 values (e.g. 3.2V/3.3V and 3.3V/3.4V),
+		 * we must shift the mask '3' with (bit - 1).
+		 */
+		ocr &= 3 << (bit - 1);
 		if (bit != host->ios.vdd)
 			dev_warn(mmc_dev(host), "exceeding card's volts\n");
 	}
@@ -1516,6 +1504,11 @@ void mmc_init_erase(struct mmc_card *card)
 		card->pref_erase = 0;
 }
 
+static bool is_trim_arg(unsigned int arg)
+{
+	return (arg & MMC_TRIM_OR_DISCARD_ARGS) && arg != MMC_DISCARD_ARG;
+}
+
 static unsigned int mmc_mmc_erase_timeout(struct mmc_card *card,
 				          unsigned int arg, unsigned int qty)
 {
@@ -1798,7 +1791,7 @@ int mmc_erase(struct mmc_card *card, unsigned int from, unsigned int nr,
 	    !(card->ext_csd.sec_feature_support & EXT_CSD_SEC_ER_EN))
 		return -EOPNOTSUPP;
 
-	if (mmc_card_mmc(card) && (arg & MMC_TRIM_ARGS) &&
+	if (mmc_card_mmc(card) && is_trim_arg(arg) &&
 	    !(card->ext_csd.sec_feature_support & EXT_CSD_SEC_GB_CL_EN))
 		return -EOPNOTSUPP;
 
@@ -1828,7 +1821,7 @@ int mmc_erase(struct mmc_card *card, unsigned int from, unsigned int nr,
 	 * identified by the card->eg_boundary flag.
 	 */
 	rem = card->erase_size - (from % card->erase_size);
-	if ((arg & MMC_TRIM_ARGS) && (card->eg_boundary) && (nr > rem)) {
+	if ((arg & MMC_TRIM_OR_DISCARD_ARGS) && card->eg_boundary && nr > rem) {
 		err = mmc_do_erase(card, from, from + rem - 1, arg);
 		from += rem;
 		if ((err) || (to <= from))
@@ -2308,43 +2301,32 @@ void mmc_rescan(struct work_struct *work)
 	if (host->caps & MMC_CAP_NEEDS_POLL)
 		mmc_schedule_delayed_work(&host->detect, HZ);
 }
-/* 
-功能：核心是执行_mmc_detect_change，启动一次mmc_rescan
-调用者：mmc_add_host
- */
+
 void mmc_start_host(struct mmc_host *host)
 {
 	bool power_up = !(host->caps2 &
 			 (MMC_CAP2_NO_PRESCAN_POWERUP | MMC_CAP2_SD_UHS2));
 
-	/* 配置host的默认时钟频率，再使能rescan */
 	host->f_init = max(min(freqs[0], host->f_max), host->f_min);
 	host->rescan_disable = 0;
 
-	/* host需要PRESCAN_POWERUP时，先mmc_power_up */
 	if (power_up) {
-		/* 占用host,可以理解为对host操作前先加锁 */
 		mmc_claim_host(host);
-		/* 执行power up相关操作，对host有配置操作 */
 		mmc_power_up(host, host->ocr_avail);
-		/* 解除占用host,可以理解为对host操作后解锁 */
 		mmc_release_host(host);
 	}
-	/* 设置卡检测方式：是使用host的cd引脚(card detect)绑定中断检测，还是poll检测 */
+
 	mmc_gpiod_request_cd_irq(host);
-	/* 核心操作，内部执行host->detect */
 	_mmc_detect_change(host, 0, false);
 }
 
 void __mmc_stop_host(struct mmc_host *host)
 {
-	/* 注销cd_gpio的中断irq */
 	if (host->slot.cd_irq >= 0) {
 		mmc_gpio_set_cd_wake(host, false);
 		disable_irq(host->slot.cd_irq);
 	}
 
-	/* 关闭rescan */
 	host->rescan_disable = 1;
 	cancel_delayed_work_sync(&host->detect);
 }
@@ -2356,9 +2338,6 @@ void mmc_stop_host(struct mmc_host *host)
 	/* clear pm flags now and let card drivers set them as needed */
 	host->pm_flags = 0;
 
-	/* 注销host bus上相关数据结构：解除mmc_card与mmc_bus、mmc_driver的绑定 
-		bus_ops->remove的具体回调是mmc_remove_card
-	*/
 	if (host->bus_ops) {
 		/* Calling bus_ops->remove() with a claimed host can deadlock */
 		host->bus_ops->remove(host);

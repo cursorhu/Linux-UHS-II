@@ -31,13 +31,8 @@ int mmc_app_cmd(struct mmc_host *host, struct mmc_card *card)
 	 * UHS2 packet has APP bit so only set APP_CMD flag here.
 	 * Will set the APP bit when assembling UHS2 packet.
 	 */
-	if (card) {
-		if (card->uhs2_state & MMC_UHS2_INITIALIZED) {
-			host->uhs2_ios.is_APP_CMD = true;
-			return 0;
-		}
-	} else {
-		if (host->flags & MMC_UHS2_INITIALIZED) {
+	if (host->card) {
+		if (host->card->uhs2_state & MMC_UHS2_INITIALIZED) {
 			host->uhs2_ios.is_APP_CMD = true;
 			return 0;
 		}

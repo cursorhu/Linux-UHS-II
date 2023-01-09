@@ -1855,11 +1855,6 @@ int mmc_attach_sd(struct mmc_host *host)
 		goto remove_card;
 
 	mmc_claim_host(host);
-
-	if ((host->flags & MMC_UHS2_INITIALIZED) &&
-	    host->ops->uhs2_post_attach_sd)
-		host->ops->uhs2_post_attach_sd(host);
-
 	return 0;
 
 remove_card:

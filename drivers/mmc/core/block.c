@@ -108,12 +108,8 @@ struct mmc_blk_busy_data {
  */
 struct mmc_blk_data {
 	struct device	*parent;
-	/* 关联该mmc card分区对应的通用磁盘设备gendisk(general disk)，将该分区注册至块设备层，应用层即可通过块设备I/O访问该mmc card分区 */
 	struct gendisk	*disk;
-	/* mmc卡是按块(例如512字节)处理数据，一般先擦后写，擦写过多会坏块；对mmc卡的请求应该做一些合并预处理后再发给卡
-	mmc_queue就是预处理块I/O层的数据请求，将请求优化后再分发给mmc host，host再通过request方法完成具体的mmc card数据通信 */
 	struct mmc_queue queue;
-	/* 关联mmc card的分区结构到mmc_blk_data结构 */
 	struct list_head part;
 	struct list_head rpmbs;
 
@@ -2302,13 +2298,13 @@ static int mmc_blk_mq_issue_rw_rq(struct mmc_queue *mq,
 	mqrq->brq.mrq.done = mmc_blk_mq_req_done;
 
 	mmc_pre_req(host, &mqrq->brq.mrq);
-	/* 先等正在执行的请求完成 */
+
 	err = mmc_blk_rw_wait(mq, &prev_req);
 	if (err)
 		goto out_post_req;
 
 	mq->rw_wait = true;
-	/* 将mmc_queue的请求数据发送请求给mmc_host, mmc_host会调用.request发送具体的MMC/SD Command给卡 */
+
 	err = mmc_start_request(host, &mqrq->brq.mrq);
 
 	if (prev_req)
@@ -2335,12 +2331,7 @@ static int mmc_blk_wait_for_idle(struct mmc_queue *mq, struct mmc_host *host)
 
 	return mmc_blk_rw_wait(mq, NULL);
 }
-/* 
-功能：block层请求转发给mmc_host层请求的关键接口
-将mmc_queue的blkdata数据，经过mmc_blk_part_switch转换后，转发给mmc_host层，
-例如写请求调用mmc_blk_mq_issue_rw_rq 
-调用者：mmc_mq_queue_rq
-*/
+
 enum mmc_issued mmc_blk_mq_issue_rq(struct mmc_queue *mq, struct request *req)
 {
 	struct mmc_blk_data *md = mq->blkdata;
@@ -2459,7 +2450,6 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
 	 */
 	md->read_only = mmc_blk_readonly(card);
 
-	/* 核心函数：创建mmc_queue, 注册mmc_mq_ops */
 	md->disk = mmc_init_queue(&md->queue, card);
 	if (IS_ERR(md->disk)) {
 		ret = PTR_ERR(md->disk);
@@ -2650,11 +2640,7 @@ static int mmc_rpmb_chrdev_release(struct inode *inode, struct file *filp)
 
 	return 0;
 }
-/* 
-RPMB（Replay Protected Memory Block重放保护内存块）Partition 是 eMMC 中的一个具有安全特性的分区。
-在写入数据到 RPMB 时，会校验数据的合法性，只有指定的 Host 才能够写入，
-在读数据时，也提供了签名机制，保证 Host 读取到的数据是 RPMB 内部数据，而不是攻击者伪造的数据
- */
+
 static const struct file_operations mmc_rpmb_fileops = {
 	.release = mmc_rpmb_chrdev_release,
 	.open = mmc_rpmb_chrdev_open,
@@ -2977,10 +2963,7 @@ static void mmc_blk_remove_debugfs(struct mmc_card *card,
 }
 
 #endif /* CONFIG_DEBUG_FS */
-/* 
-功能：block层的初始化配置，建立对上层disk，下层mmc queue的关联
-调用者：mmc_driver
- */
+
 static int mmc_blk_probe(struct mmc_card *card)
 {
 	struct mmc_blk_data *md;
@@ -3001,7 +2984,6 @@ static int mmc_blk_probe(struct mmc_card *card)
 		return -ENOMEM;
 	}
 
-	/* 分配mmc block层的数据结构，包括mmc queue */
 	md = mmc_blk_alloc(card);
 	if (IS_ERR(md)) {
 		ret = PTR_ERR(md);
@@ -3105,22 +3087,13 @@ static int mmc_blk_resume(struct device *dev)
 #endif
 
 static SIMPLE_DEV_PM_OPS(mmc_blk_pm_ops, mmc_blk_suspend, mmc_blk_resume);
-/* 
-功能：定义bus-driver-device模型中的driver实例，
-driver实例的注册，由mmc_blk_init调用bus.c的mmc_register_driver的driver_register实现，
-device实例的注册，由插卡调用rescan和卡初始化后，bus.c调用的device_add(&card->dev)完成.
-以上两者都注册到bus后，bus会调用driver的probe(对于mmc driver和device是一对一，不需要bus去专门match)，即mmc_blk_probe
- */
+
 static struct mmc_driver mmc_driver = {
 	.drv		= {
 		.name	= "mmcblk",
 		.pm	= &mmc_blk_pm_ops,
 	},
-	/* mmc block类设备的一些初始化，完成和host,card设备的关联 */
 	.probe		= mmc_blk_probe,
-	/* mmc block类设备的析构，解除和host,card设备的关联：
-	拔卡引起rescan，最终调用device_del(&card->dev)析构卡设备, 
-	卡设备引用计数为0，触发bus的remove，调用到mmc_driver的remove */
 	.remove		= mmc_blk_remove,
 	.shutdown	= mmc_blk_shutdown,
 };

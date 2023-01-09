@@ -929,7 +929,7 @@ static void gl9755_uhs2_reset_sd_tran(struct sdhci_host *host)
 		sdhci_writel(host, host->ier, SDHCI_SIGNAL_ENABLE);
 		sdhci_uhs2_clear_set_irqs(host,
 					  SDHCI_INT_ALL_MASK,
-					  SDHCI_UHS2_ERR_INT_STATUS_MASK);
+					  SDHCI_UHS2_INT_ERROR_MASK);
 	}
 }
 
@@ -945,7 +945,7 @@ static void sdhci_gl9755_reset(struct sdhci_host *host, u8 mask)
 		clk_ctrl = sdhci_readw(host, SDHCI_CLOCK_CONTROL);
 
 		if ((ctrl2 & SDHCI_CTRL_V4_MODE) &&
-		    (ctrl2 & SDHCI_CTRL_UHS2_INTERFACE_EN)) {
+		    (ctrl2 & SDHCI_CTRL_UHS2_ENABLE)) {
 			sdhci_writew(host,
 				     SDHCI_CLOCK_INT_EN,
 				     SDHCI_CLOCK_CONTROL);
@@ -1397,7 +1397,6 @@ static const struct sdhci_ops sdhci_gl9755_ops = {
 	.reset			= sdhci_gl9755_reset,
 	.set_uhs_signaling	= sdhci_set_uhs_signaling,
 	.voltage_switch		= sdhci_gli_voltage_switch,
-	.uhs2_reset		= sdhci_uhs2_reset,
 	.dump_uhs2_regs		= sdhci_uhs2_dump_regs,
 	.set_timeout		= sdhci_uhs2_set_timeout,
 	.irq			= sdhci_uhs2_irq,

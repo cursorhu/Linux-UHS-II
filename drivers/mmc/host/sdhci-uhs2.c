@@ -11,10 +11,12 @@
  */
 
 #include <linux/delay.h>
-#include <linux/dmaengine.h>
-#include <linux/ktime.h>
 #include <linux/module.h>
+#include <linux/iopoll.h>
+#include <linux/bitfield.h>
+#include <linux/ktime.h>
 #include <linux/mmc/mmc.h>
+#include <linux/dmaengine.h>
 #include <linux/regulator/consumer.h>
 
 #include "sdhci.h"
@@ -26,9 +28,11 @@
 #define SDHCI_UHS2_DUMP(f, x...) \
 	pr_err("%s: " DRIVER_NAME ": " f, mmc_hostname(host->mmc), ## x)
 
+#define UHS2_ARG_IOADR_MASK 0xfff
+
 void sdhci_uhs2_dump_regs(struct sdhci_host *host)
 {
-	if (!host->mmc || !(host->mmc->flags & MMC_UHS2_SUPPORT))
+	if (!(host->mmc->flags & MMC_UHS2_SUPPORT))
 		return;
 
 	SDHCI_UHS2_DUMP("==================== UHS2 ==================\n");
@@ -36,7 +40,7 @@ void sdhci_uhs2_dump_regs(struct sdhci_host *host)
 			sdhci_readw(host, SDHCI_UHS2_BLOCK_SIZE),
 			sdhci_readl(host, SDHCI_UHS2_BLOCK_COUNT));
 	SDHCI_UHS2_DUMP("Cmd:       0x%08x | Trn mode: 0x%08x\n",
-			sdhci_readw(host, SDHCI_UHS2_COMMAND),
+			sdhci_readw(host, SDHCI_UHS2_CMD),
 			sdhci_readw(host, SDHCI_UHS2_TRANS_MODE));
 	SDHCI_UHS2_DUMP("Int Stat:  0x%08x | Dev Sel : 0x%08x\n",
 			sdhci_readw(host, SDHCI_UHS2_DEV_INT_STATUS),
@@ -47,10 +51,10 @@ void sdhci_uhs2_dump_regs(struct sdhci_host *host)
 			sdhci_readw(host, SDHCI_UHS2_SW_RESET),
 			sdhci_readw(host, SDHCI_UHS2_TIMER_CTRL));
 	SDHCI_UHS2_DUMP("ErrInt:    0x%08x | ErrIntEn: 0x%08x\n",
-			sdhci_readl(host, SDHCI_UHS2_ERR_INT_STATUS),
-			sdhci_readl(host, SDHCI_UHS2_ERR_INT_STATUS_EN));
+			sdhci_readl(host, SDHCI_UHS2_INT_STATUS),
+			sdhci_readl(host, SDHCI_UHS2_INT_STATUS_ENABLE));
 	SDHCI_UHS2_DUMP("ErrSigEn:  0x%08x\n",
-			sdhci_readl(host, SDHCI_UHS2_ERR_INT_SIG_EN));
+			sdhci_readl(host, SDHCI_UHS2_INT_SIGNAL_ENABLE));
 }
 EXPORT_SYMBOL_GPL(sdhci_uhs2_dump_regs);
 
@@ -60,15 +64,21 @@ EXPORT_SYMBOL_GPL(sdhci_uhs2_dump_regs);
  *                                                                           *
 \*****************************************************************************/
 
+static inline u16 uhs2_dev_cmd(struct mmc_command *cmd)
+{
+	return be16_to_cpu((__be16)cmd->uhs2_cmd->arg) & UHS2_ARG_IOADR_MASK;
+}
+
+static inline int mmc_opt_regulator_set_ocr(struct mmc_host *mmc,
+					    struct regulator *supply,
+					    unsigned short vdd_bit)
+{
+	return IS_ERR_OR_NULL(supply) ? 0 : mmc_regulator_set_ocr(mmc, supply, vdd_bit);
+}
+
 bool sdhci_uhs2_mode(struct sdhci_host *host)
 {
-	if ((host->mmc->caps2 & MMC_CAP2_SD_UHS2) &&
-	    (IS_ENABLED(CONFIG_MMC_SDHCI_UHS2) &&
-		(host->version >= SDHCI_SPEC_400) &&
-		(host->mmc->flags & MMC_UHS2_SUPPORT)))
-		return true;
-	else
-		return false;
+	return host->mmc->flags & MMC_UHS2_SUPPORT;
 }
 
 /**
@@ -83,30 +93,13 @@ void sdhci_uhs2_reset(struct sdhci_host *host, u16 mask)
 	unsigned long timeout;
 	u32 val;
 
-	if (!(sdhci_uhs2_mode(host))) {
-		/**
-		 * u8  mask for legacy.
-		 * u16 mask for uhs-2.
-		 */
-		u8 u8_mask;
-
-		u8_mask = (mask & 0xFF);
-		sdhci_reset(host, u8_mask);
-
-		return;
-	}
-
 	sdhci_writew(host, mask, SDHCI_UHS2_SW_RESET);
 
-	if (mask & SDHCI_UHS2_SW_RESET_FULL) {
+	if (mask & SDHCI_UHS2_SW_RESET_FULL)
 		host->clock = 0;
-		/* Reset-all turns off SD Bus Power */
-		if (host->quirks2 & SDHCI_QUIRK2_CARD_ON_NEEDS_BUS_ON)
-			sdhci_runtime_pm_bus_off(host);
-	}
 
 	/* Wait max 100 ms */
-	timeout = 10000;
+	timeout = 100000;
 
 	/* hw clears the bit when it's done */
 	if (read_poll_timeout_atomic(sdhci_readw, val, !(val & mask), 10,
@@ -121,17 +114,11 @@ void sdhci_uhs2_reset(struct sdhci_host *host, u16 mask)
 }
 EXPORT_SYMBOL_GPL(sdhci_uhs2_reset);
 
-void sdhci_uhs2_set_power(struct sdhci_host *host, unsigned char mode,
+static void sdhci_uhs2_set_power(struct sdhci_host *host, unsigned char mode,
 			  unsigned short vdd)
 {
 	struct mmc_host *mmc = host->mmc;
 	u8 pwr;
-
-	/* FIXME: check if flags & MMC_UHS2_SUPPORT? */
-	if (!(sdhci_uhs2_mode(host))) {
-		sdhci_set_power(host, mode, vdd);
-		return;
-	}
 
 	if (mode != MMC_POWER_OFF) {
 		pwr = sdhci_get_vdd_value(vdd);
@@ -148,35 +135,12 @@ void sdhci_uhs2_set_power(struct sdhci_host *host, unsigned char mode,
 	if (pwr == 0) {
 		sdhci_writeb(host, 0, SDHCI_POWER_CONTROL);
 
-		if (!IS_ERR(host->mmc->supply.vmmc))
-			mmc_regulator_set_ocr(mmc, mmc->supply.vmmc, 0);
-		if (!IS_ERR_OR_NULL(host->mmc->supply.vmmc2))
-			mmc_regulator_set_ocr(mmc, mmc->supply.vmmc2, 0);
-
-		if (host->quirks2 & SDHCI_QUIRK2_CARD_ON_NEEDS_BUS_ON)
-			sdhci_runtime_pm_bus_off(host);
+		mmc_opt_regulator_set_ocr(mmc, mmc->supply.vmmc, 0);
+		mmc_opt_regulator_set_ocr(mmc, mmc->supply.vmmc2, 0);
 	} else {
-		if (!IS_ERR(host->mmc->supply.vmmc))
-			mmc_regulator_set_ocr(mmc, mmc->supply.vmmc, vdd);
-		if (!IS_ERR_OR_NULL(host->mmc->supply.vmmc2))
-			/* support 1.8v only for now */
-			mmc_regulator_set_ocr(mmc, mmc->supply.vmmc2,
-					      fls(MMC_VDD2_165_195) - 1);
-
-		/*
-		 * Spec says that we should clear the power reg before setting
-		 * a new value. Some controllers don't seem to like this though.
-		 */
-		if (!(host->quirks & SDHCI_QUIRK_SINGLE_POWER_WRITE))
-			sdhci_writeb(host, 0, SDHCI_POWER_CONTROL);
-
-		/*
-		 * At least the Marvell CaFe chip gets confused if we set the
-		 * voltage and set turn on power at the same time, so set the
-		 * voltage first.
-		 */
-		if (host->quirks & SDHCI_QUIRK_NO_SIMULT_VDD_AND_POWER)
-			sdhci_writeb(host, pwr, SDHCI_POWER_CONTROL);
+		mmc_opt_regulator_set_ocr(mmc, mmc->supply.vmmc, vdd);
+		/* support 1.8v only for now */
+		mmc_opt_regulator_set_ocr(mmc, mmc->supply.vmmc2, fls(MMC_VDD2_165_195) - 1);
 
 		/* vdd first */
 		pwr |= SDHCI_POWER_ON;
@@ -186,38 +150,13 @@ void sdhci_uhs2_set_power(struct sdhci_host *host, unsigned char mode,
 		pwr |= SDHCI_VDD2_POWER_ON;
 		sdhci_writeb(host, pwr, SDHCI_POWER_CONTROL);
 		mdelay(5);
-
-		if (host->quirks2 & SDHCI_QUIRK2_CARD_ON_NEEDS_BUS_ON)
-			sdhci_runtime_pm_bus_on(host);
-
-		/*
-		 * Some controllers need an extra 10ms delay of 10ms before
-		 * they can apply clock after applying power
-		 */
-		if (host->quirks & SDHCI_QUIRK_DELAY_AFTER_POWER)
-			mdelay(10);
 	}
 }
-EXPORT_SYMBOL_GPL(sdhci_uhs2_set_power);
 
-static u8 sdhci_calc_timeout_uhs2(struct sdhci_host *host, u8 *cmd_res,
-				  u8 *dead_lock)
+static u8 sdhci_calc_timeout_uhs2(struct sdhci_host *host, u8 *cmd_res, u8 *dead_lock)
 {
 	u8 count;
 	unsigned int cmd_res_timeout, dead_lock_timeout, current_timeout;
-
-	/*
-	 * If the host controller provides us with an incorrect timeout
-	 * value, just skip the check and use 0xE.  The hardware may take
-	 * longer to time out, but that's much better than having a too-short
-	 * timeout value.
-	 */
-	if (host->quirks & SDHCI_QUIRK_BROKEN_TIMEOUT_VAL) {
-		*cmd_res = 0xE;
-		*dead_lock = 0xE;
-		return 0xE;
-	}
-
 	/* timeout in us */
 	cmd_res_timeout = 5 * 1000;
 	dead_lock_timeout = 1 * 1000 * 1000;
@@ -272,7 +211,7 @@ static void __sdhci_uhs2_set_timeout(struct sdhci_host *host)
 	u8 cmd_res, dead_lock;
 
 	sdhci_calc_timeout_uhs2(host, &cmd_res, &dead_lock);
-	cmd_res |= dead_lock << SDHCI_UHS2_TIMER_CTRL_DEADLOCK_SHIFT;
+	cmd_res |= FIELD_PREP(SDHCI_UHS2_TIMER_CTRL_DEADLOCK_MASK, dead_lock);
 	sdhci_writeb(host, cmd_res, SDHCI_UHS2_TIMER_CTRL);
 }
 
@@ -280,7 +219,7 @@ void sdhci_uhs2_set_timeout(struct sdhci_host *host, struct mmc_command *cmd)
 {
 	__sdhci_set_timeout(host, cmd);
 
-	if (host->mmc->flags & MMC_UHS2_SUPPORT)
+	if (sdhci_uhs2_mode(host))
 		__sdhci_uhs2_set_timeout(host);
 }
 EXPORT_SYMBOL_GPL(sdhci_uhs2_set_timeout);
@@ -297,11 +236,11 @@ void sdhci_uhs2_clear_set_irqs(struct sdhci_host *host, u32 clear, u32 set)
 {
 	u32 ier;
 
-	ier = sdhci_readl(host, SDHCI_UHS2_ERR_INT_STATUS_EN);
+	ier = sdhci_readl(host, SDHCI_UHS2_INT_STATUS_ENABLE);
 	ier &= ~clear;
 	ier |= set;
-	sdhci_writel(host, ier, SDHCI_UHS2_ERR_INT_STATUS_EN);
-	sdhci_writel(host, ier, SDHCI_UHS2_ERR_INT_SIG_EN);
+	sdhci_writel(host, ier, SDHCI_UHS2_INT_STATUS_ENABLE);
+	sdhci_writel(host, ier, SDHCI_UHS2_INT_SIGNAL_ENABLE);
 }
 EXPORT_SYMBOL_GPL(sdhci_uhs2_clear_set_irqs);
 
@@ -310,32 +249,28 @@ static void __sdhci_uhs2_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 	struct sdhci_host *host = mmc_priv(mmc);
 	u8 cmd_res, dead_lock;
 	u16 ctrl_2;
-	unsigned long flags;
-
-	/* FIXME: why lock? */
-	spin_lock_irqsave(&host->lock, flags);
 
 	/* UHS2 Timeout Control */
 	sdhci_calc_timeout_uhs2(host, &cmd_res, &dead_lock);
 
 	/* change to use calculate value */
-	cmd_res |= dead_lock << SDHCI_UHS2_TIMER_CTRL_DEADLOCK_SHIFT;
+	cmd_res |= FIELD_PREP(SDHCI_UHS2_TIMER_CTRL_DEADLOCK_MASK, dead_lock);
 
 	sdhci_uhs2_clear_set_irqs(host,
-				  SDHCI_UHS2_ERR_INT_STATUS_RES_TIMEOUT |
-				  SDHCI_UHS2_ERR_INT_STATUS_DEADLOCK_TIMEOUT,
+				  SDHCI_UHS2_INT_CMD_TIMEOUT |
+				  SDHCI_UHS2_INT_DEADLOCK_TIMEOUT,
 				  0);
 	sdhci_writeb(host, cmd_res, SDHCI_UHS2_TIMER_CTRL);
 	sdhci_uhs2_clear_set_irqs(host, 0,
-				  SDHCI_UHS2_ERR_INT_STATUS_RES_TIMEOUT |
-				  SDHCI_UHS2_ERR_INT_STATUS_DEADLOCK_TIMEOUT);
+				  SDHCI_UHS2_INT_CMD_TIMEOUT |
+				  SDHCI_UHS2_INT_DEADLOCK_TIMEOUT);
 
 	/* UHS2 timing */
 	ctrl_2 = sdhci_readw(host, SDHCI_HOST_CONTROL2);
 	if (ios->timing == MMC_TIMING_SD_UHS2)
-		ctrl_2 |= SDHCI_CTRL_UHS_2 | SDHCI_CTRL_UHS2_INTERFACE_EN;
+		ctrl_2 |= SDHCI_CTRL_UHS2 | SDHCI_CTRL_UHS2_ENABLE;
 	else
-		ctrl_2 &= ~(SDHCI_CTRL_UHS_2 | SDHCI_CTRL_UHS2_INTERFACE_EN);
+		ctrl_2 &= ~(SDHCI_CTRL_UHS2 | SDHCI_CTRL_UHS2_ENABLE);
 	sdhci_writew(host, ctrl_2, SDHCI_HOST_CONTROL2);
 
 	if (!(host->quirks2 & SDHCI_QUIRK2_PRESET_VALUE_BROKEN))
@@ -349,40 +284,33 @@ static void __sdhci_uhs2_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 
 	host->timing = ios->timing;
 	sdhci_set_clock(host, host->clock);
-
-	spin_unlock_irqrestore(&host->lock, flags);
 }
 
 static void sdhci_uhs2_set_config(struct sdhci_host *host)
 {
 	u32 value;
-	u16 sdhci_uhs2_set_ptr = sdhci_readw(host, SDHCI_UHS2_SET_PTR);
+	u16 sdhci_uhs2_set_ptr = sdhci_readw(host, SDHCI_UHS2_SETTINGS_PTR);
 	u16 sdhci_uhs2_gen_set_reg = (sdhci_uhs2_set_ptr + 0);
 	u16 sdhci_uhs2_phy_set_reg = (sdhci_uhs2_set_ptr + 4);
 	u16 sdhci_uhs2_tran_set_reg = (sdhci_uhs2_set_ptr + 8);
 	u16 sdhci_uhs2_tran_set_1_reg = (sdhci_uhs2_set_ptr + 12);
 
 	/* Set Gen Settings */
-	sdhci_writel(host, host->mmc->uhs2_caps.n_lanes_set <<
-		SDHCI_UHS2_GEN_SET_N_LANES_POS, sdhci_uhs2_gen_set_reg);
+	value = FIELD_PREP(SDHCI_UHS2_GEN_SETTINGS_N_LANES_MASK, host->mmc->uhs2_caps.n_lanes_set);
+	sdhci_writel(host, value, sdhci_uhs2_gen_set_reg);
 
 	/* Set PHY Settings */
-	value = (host->mmc->uhs2_caps.n_lss_dir_set <<
-			SDHCI_UHS2_PHY_SET_N_LSS_DIR_POS) |
-		(host->mmc->uhs2_caps.n_lss_sync_set <<
-			SDHCI_UHS2_PHY_SET_N_LSS_SYN_POS);
+	value = FIELD_PREP(SDHCI_UHS2_PHY_N_LSS_DIR_MASK, host->mmc->uhs2_caps.n_lss_dir_set) |
+		FIELD_PREP(SDHCI_UHS2_PHY_N_LSS_SYN_MASK, host->mmc->uhs2_caps.n_lss_sync_set);
 	if (host->mmc->flags & MMC_UHS2_SPEED_B)
-		value |= 1 << SDHCI_UHS2_PHY_SET_SPEED_POS;
+		value |= SDHCI_UHS2_PHY_SET_SPEED_B;
 	sdhci_writel(host, value, sdhci_uhs2_phy_set_reg);
 
 	/* Set LINK-TRAN Settings */
-	value = (host->mmc->uhs2_caps.max_retry_set <<
-			SDHCI_UHS2_TRAN_SET_RETRY_CNT_POS) |
-		(host->mmc->uhs2_caps.n_fcu_set <<
-			SDHCI_UHS2_TRAN_SET_N_FCU_POS);
+	value = FIELD_PREP(SDHCI_UHS2_TRAN_RETRY_CNT_MASK, host->mmc->uhs2_caps.max_retry_set) |
+		FIELD_PREP(SDHCI_UHS2_TRAN_N_FCU_MASK, host->mmc->uhs2_caps.n_fcu_set);
 	sdhci_writel(host, value, sdhci_uhs2_tran_set_reg);
-	sdhci_writel(host, host->mmc->uhs2_caps.n_data_gap_set,
-		     sdhci_uhs2_tran_set_1_reg);
+	sdhci_writel(host, host->mmc->uhs2_caps.n_data_gap_set, sdhci_uhs2_tran_set_1_reg);
 }
 
 static int sdhci_uhs2_check_dormant(struct sdhci_host *host)
@@ -433,7 +361,7 @@ int sdhci_uhs2_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 	}
 
 	if (ios->power_mode == MMC_POWER_UNDEFINED)
-		return 1;
+		return 0;
 
 	if (host->flags & SDHCI_DEVICE_DEAD) {
 		if (!IS_ERR(mmc->supply.vmmc) &&
@@ -442,10 +370,10 @@ int sdhci_uhs2_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		if (!IS_ERR_OR_NULL(mmc->supply.vmmc2) &&
 		    ios->power_mode == MMC_POWER_OFF)
 			mmc_regulator_set_ocr(mmc, mmc->supply.vmmc2, 0);
-		return 1;
+		return -1;
 	}
 
-	/* FIXME: host->timing = ios->timing */
+	host->timing = ios->timing;
 
 	sdhci_set_ios_common(mmc, ios);
 
@@ -490,14 +418,11 @@ static int sdhci_uhs2_do_detect_init(struct mmc_host *mmc);
 static int sdhci_uhs2_control(struct mmc_host *mmc, enum sd_uhs2_operation op)
 {
 	struct sdhci_host *host = mmc_priv(mmc);
-	unsigned long flags;
 	int err = 0;
-	u16 sdhci_uhs2_set_ptr = sdhci_readw(host, SDHCI_UHS2_SET_PTR);
+	u16 sdhci_uhs2_set_ptr = sdhci_readw(host, SDHCI_UHS2_SETTINGS_PTR);
 	u16 sdhci_uhs2_phy_set_reg = (sdhci_uhs2_set_ptr + 4);
 
-	DBG("Begin %s, act %d.\n", __func__, op);
-
-	spin_lock_irqsave(&host->lock, flags);
+	DBG("Begin uhs2 control, act %d.\n", op);
 
 	switch (op) {
 	case UHS2_PHY_INIT:
@@ -507,14 +432,13 @@ static int sdhci_uhs2_control(struct mmc_host *mmc, enum sd_uhs2_operation op)
 		sdhci_uhs2_set_config(host);
 		break;
 	case UHS2_ENABLE_INT:
-		sdhci_clear_set_irqs(host, 0, SDHCI_INT_CARD_INT);
+		sdhci_uhs2_clear_set_irqs(host, 0, SDHCI_INT_CARD_INT);
 		break;
 	case UHS2_DISABLE_INT:
-		sdhci_clear_set_irqs(host, SDHCI_INT_CARD_INT, 0);
+		sdhci_uhs2_clear_set_irqs(host, SDHCI_INT_CARD_INT, 0);
 		break;
 	case UHS2_SET_SPEED_B:
-		sdhci_writeb(host, 1 << SDHCI_UHS2_PHY_SET_SPEED_POS,
-			     sdhci_uhs2_phy_set_reg);
+		sdhci_writeb(host, SDHCI_UHS2_PHY_SET_SPEED_B, sdhci_uhs2_phy_set_reg);
 		break;
 	case UHS2_CHECK_DORMANT:
 		err = sdhci_uhs2_check_dormant(host);
@@ -534,8 +458,6 @@ static int sdhci_uhs2_control(struct mmc_host *mmc, enum sd_uhs2_operation op)
 		err = -EIO;
 		break;
 	}
-
-	spin_unlock_irqrestore(&host->lock, flags);
 
 	return err;
 }
@@ -559,49 +481,12 @@ static void sdhci_uhs2_prepare_data(struct sdhci_host *host,
 	sdhci_writew(host, data->blocks, SDHCI_UHS2_BLOCK_COUNT);
 }
 
-#if IS_ENABLED(CONFIG_MMC_SDHCI_EXTERNAL_DMA)
-static void sdhci_uhs2_external_dma_prepare_data(struct sdhci_host *host,
-						 struct mmc_command *cmd)
-{
-	if (!sdhci_external_dma_setup(host, cmd)) {
-		__sdhci_external_dma_prepare_data(host, cmd);
-	} else {
-		sdhci_external_dma_release(host);
-		pr_err("%s: Cannot use external DMA, switch to the DMA/PIO which standard SDHCI provides.\n",
-		       mmc_hostname(host->mmc));
-		sdhci_uhs2_prepare_data(host, cmd);
-	}
-}
-#else
-static inline void sdhci_uhs2_external_dma_prepare_data(struct sdhci_host *host,
-							struct mmc_command *cmd)
-{
-	/* This should never happen */
-	WARN_ON_ONCE(1);
-}
-
-static inline void sdhci_external_dma_pre_transfer(struct sdhci_host *host,
-						   struct mmc_command *cmd)
-{
-}
-
-static inline struct dma_chan *sdhci_external_dma_channel(struct sdhci_host *host,
-							  struct mmc_data *data)
-{
-	return NULL;
-}
-#endif /* CONFIG_MMC_SDHCI_EXTERNAL_DMA */
-
 static void sdhci_uhs2_finish_data(struct sdhci_host *host)
 {
 	struct mmc_data *data = host->data;
 
 	__sdhci_finish_data_common(host);
 
-	/*
-	 *  FIXME: Is this condition needed?
-	    if (host->mmc->flags & MMC_UHS2_INITIALIZED)
-	 */
 	__sdhci_finish_mrq(host, data->mrq);
 }
 
@@ -610,18 +495,14 @@ static void sdhci_uhs2_set_transfer_mode(struct sdhci_host *host,
 {
 	u16 mode;
 	struct mmc_data *data = cmd->data;
-	u16 arg;
 
 	if (!data) {
 		/* clear Auto CMD settings for no data CMDs */
-		arg = cmd->uhs2_cmd->arg;
-		if ((((arg & 0xF) << 8) | ((arg >> 8) & 0xFF)) ==
-		       UHS2_DEV_CMD_TRANS_ABORT) {
+		if (uhs2_dev_cmd(cmd) == UHS2_DEV_CMD_TRANS_ABORT) {
 			mode =  0;
 		} else {
 			mode = sdhci_readw(host, SDHCI_UHS2_TRANS_MODE);
-			if (cmd->opcode == MMC_STOP_TRANSMISSION ||
-			    cmd->opcode == MMC_ERASE)
+			if (cmd->opcode == MMC_STOP_TRANSMISSION || cmd->opcode == MMC_ERASE)
 				mode |= SDHCI_UHS2_TRNS_WAIT_EBSY;
 			else
 				/* send status mode */
@@ -629,8 +510,7 @@ static void sdhci_uhs2_set_transfer_mode(struct sdhci_host *host,
 					mode = 0;
 		}
 
-		if (IS_ENABLED(CONFIG_MMC_DEBUG))
-			DBG("UHS2 no data trans mode is 0x%x.\n", mode);
+		DBG("UHS2 no data trans mode is 0x%x.\n", mode);
 
 		sdhci_writew(host, mode, SDHCI_UHS2_TRANS_MODE);
 		return;
@@ -658,8 +538,7 @@ static void sdhci_uhs2_set_transfer_mode(struct sdhci_host *host,
 
 	sdhci_writew(host, mode, SDHCI_UHS2_TRANS_MODE);
 
-	if (IS_ENABLED(CONFIG_MMC_DEBUG))
-		DBG("UHS2 trans mode is 0x%x.\n", mode);
+	DBG("UHS2 trans mode is 0x%x.\n", mode);
 }
 
 static void __sdhci_uhs2_send_command(struct sdhci_host *host,
@@ -667,14 +546,6 @@ static void __sdhci_uhs2_send_command(struct sdhci_host *host,
 {
 	int i, j;
 	int cmd_reg;
-
-	if (host->mmc->flags & MMC_UHS2_INITIALIZED) {
-		if (!cmd->uhs2_cmd) {
-			pr_err("%s: fatal error, no uhs2_cmd!\n",
-			       mmc_hostname(host->mmc));
-			return;
-		}
-	}
 
 	i = 0;
 	sdhci_writel(host,
@@ -689,44 +560,37 @@ static void __sdhci_uhs2_send_command(struct sdhci_host *host,
 	 * MSB when preparing config read/write commands.
 	 */
 	for (j = 0; j < cmd->uhs2_cmd->payload_len / sizeof(u32); j++) {
-		sdhci_writel(host, *(cmd->uhs2_cmd->payload + j),
-			     SDHCI_UHS2_CMD_PACKET + i);
+		sdhci_writel(host, *(cmd->uhs2_cmd->payload + j), SDHCI_UHS2_CMD_PACKET + i);
 		i += 4;
 	}
 
 	for ( ; i < SDHCI_UHS2_CMD_PACK_MAX_LEN; i += 4)
 		sdhci_writel(host, 0, SDHCI_UHS2_CMD_PACKET + i);
 
-	if (IS_ENABLED(CONFIG_MMC_DEBUG)) {
-		DBG("UHS2 CMD packet_len = %d.\n", cmd->uhs2_cmd->packet_len);
-		for (i = 0; i < cmd->uhs2_cmd->packet_len; i++)
-			DBG("UHS2 CMD_PACKET[%d] = 0x%x.\n", i,
-			    sdhci_readb(host, SDHCI_UHS2_CMD_PACKET + i));
-	}
+	DBG("UHS2 CMD packet_len = %d.\n", cmd->uhs2_cmd->packet_len);
+	for (i = 0; i < cmd->uhs2_cmd->packet_len; i++)
+		DBG("UHS2 CMD_PACKET[%d] = 0x%x.\n", i,
+		    sdhci_readb(host, SDHCI_UHS2_CMD_PACKET + i));
 
-	cmd_reg = cmd->uhs2_cmd->packet_len <<
-		SDHCI_UHS2_COMMAND_PACK_LEN_SHIFT;
+	cmd_reg = FIELD_PREP(SDHCI_UHS2_CMD_PACK_LEN_MASK, cmd->uhs2_cmd->packet_len);
 	if ((cmd->flags & MMC_CMD_MASK) == MMC_CMD_ADTC)
-		cmd_reg |= SDHCI_UHS2_COMMAND_DATA;
+		cmd_reg |= SDHCI_UHS2_CMD_DATA;
 	if (cmd->opcode == MMC_STOP_TRANSMISSION)
-		cmd_reg |= SDHCI_UHS2_COMMAND_CMD12;
+		cmd_reg |= SDHCI_UHS2_CMD_CMD12;
 
 	/* UHS2 Native ABORT */
 	if ((cmd->uhs2_cmd->header & UHS2_NATIVE_PACKET) &&
-	    ((((cmd->uhs2_cmd->arg & 0xF) << 8) |
-	    ((cmd->uhs2_cmd->arg >> 8) & 0xFF)) == UHS2_DEV_CMD_TRANS_ABORT))
-		cmd_reg |= SDHCI_UHS2_COMMAND_TRNS_ABORT;
+	    (uhs2_dev_cmd(cmd) == UHS2_DEV_CMD_TRANS_ABORT))
+		cmd_reg |= SDHCI_UHS2_CMD_TRNS_ABORT;
 
 	/* UHS2 Native DORMANT */
 	if ((cmd->uhs2_cmd->header & UHS2_NATIVE_PACKET) &&
-	    ((((cmd->uhs2_cmd->arg & 0xF) << 8) |
-	     ((cmd->uhs2_cmd->arg >> 8) & 0xFF)) ==
-				UHS2_DEV_CMD_GO_DORMANT_STATE))
-		cmd_reg |= SDHCI_UHS2_COMMAND_DORMANT;
+	    (uhs2_dev_cmd(cmd) == UHS2_DEV_CMD_GO_DORMANT_STATE))
+		cmd_reg |= SDHCI_UHS2_CMD_DORMANT;
 
 	DBG("0x%x is set to UHS2 CMD register.\n", cmd_reg);
 
-	sdhci_writew(host, cmd_reg, SDHCI_UHS2_COMMAND);
+	sdhci_writew(host, cmd_reg, SDHCI_UHS2_CMD);
 }
 
 static bool sdhci_uhs2_send_command(struct sdhci_host *host,
@@ -740,9 +604,6 @@ static bool sdhci_uhs2_send_command(struct sdhci_host *host,
 
 	/* Initially, a command has no error */
 	cmd->error = 0;
-
-	if (!(host->mmc->flags & MMC_UHS2_SUPPORT))
-		return sdhci_send_command(host, cmd);
 
 	if (cmd->opcode == MMC_STOP_TRANSMISSION)
 		cmd->flags |= MMC_RSP_BUSY;
@@ -760,12 +621,8 @@ static bool sdhci_uhs2_send_command(struct sdhci_host *host,
 		__sdhci_uhs2_set_timeout(host);
 	}
 
-	if (cmd->data) {
-		if (host->use_external_dma)
-			sdhci_uhs2_external_dma_prepare_data(host, cmd);
-		else
-			sdhci_uhs2_prepare_data(host, cmd);
-	}
+	if (cmd->data)
+		sdhci_uhs2_prepare_data(host, cmd);
 
 	sdhci_uhs2_set_transfer_mode(host, cmd);
 
@@ -801,9 +658,6 @@ static bool sdhci_uhs2_send_command(struct sdhci_host *host,
 	else
 		timeout += 10 * HZ;
 	sdhci_mod_timer(host, cmd->mrq, timeout);
-
-	if (host->use_external_dma)
-		sdhci_external_dma_pre_transfer(host, cmd);
 
 	__sdhci_uhs2_send_command(host, cmd);
 
@@ -859,15 +713,16 @@ static void __sdhci_uhs2_finish_command(struct sdhci_host *host)
 	bool bReadA0 = 0;
 	int i;
 
-	if (host->mmc->flags & MMC_UHS2_INITIALIZED) {
-		resp = sdhci_readb(host, SDHCI_UHS2_RESPONSE + 2);
-		if (resp & UHS2_RES_NACK_MASK) {
-			ecode = (resp >> UHS2_RES_ECODE_POS) &
-				UHS2_RES_ECODE_MASK;
-			pr_err("%s: NACK is got, ECODE=0x%x.\n",
-			       mmc_hostname(host->mmc), ecode);
+	if (host->mmc->card) {
+		if (host->mmc->card->uhs2_state & MMC_UHS2_INITIALIZED) {
+			resp = sdhci_readb(host, SDHCI_UHS2_RESPONSE + 2);
+			if (resp & UHS2_RES_NACK_MASK) {
+				ecode = (resp >> UHS2_RES_ECODE_POS) & UHS2_RES_ECODE_MASK;
+				pr_err("%s: NACK is got, ECODE=0x%x.\n",
+				mmc_hostname(host->mmc), ecode);
+			}
+			bReadA0 = 1;
 		}
-		bReadA0 = 1;
 	}
 
 	if (cmd->uhs2_resp &&
@@ -876,8 +731,7 @@ static void __sdhci_uhs2_finish_command(struct sdhci_host *host)
 		 * DEVICE_INIT, ENUMERATE.
 		 */
 		for (i = 0; i < cmd->uhs2_resp_len; i++)
-			cmd->uhs2_resp[i] =
-				sdhci_readb(host, SDHCI_UHS2_RESPONSE + i);
+			cmd->uhs2_resp[i] = sdhci_readb(host, SDHCI_UHS2_RESPONSE + i);
 	} else {
 		/* Get SD CMD response and Payload for some read
 		 * CCMD, like INQUIRY_CFG.
@@ -906,12 +760,6 @@ static void __sdhci_uhs2_finish_command(struct sdhci_host *host)
 static void sdhci_uhs2_finish_command(struct sdhci_host *host)
 {
 	struct mmc_command *cmd = host->cmd;
-
-	/* FIXME: Is this check necessary? */
-	if (!(host->mmc->flags & MMC_UHS2_SUPPORT)) {
-		sdhci_finish_command(host);
-		return;
-	}
 
 	__sdhci_uhs2_finish_command(host);
 
@@ -960,10 +808,6 @@ static bool sdhci_uhs2_request_done(struct sdhci_host *host)
 	struct mmc_request *mrq;
 	int i;
 
-	/* FIXME: UHS2_INITIALIZED, instead? */
-	if (!(host->mmc->flags & MMC_UHS2_SUPPORT))
-		return sdhci_request_done(host);
-
 	spin_lock_irqsave(&host->lock, flags);
 
 	for (i = 0; i < SDHCI_MAX_MRQS; i++) {
@@ -982,22 +826,8 @@ static bool sdhci_uhs2_request_done(struct sdhci_host *host)
 	 * sdhci_prepare_data() whenever we finish with a request.
 	 * This avoids leaking DMA mappings on error.
 	 */
-	if (host->flags & SDHCI_REQ_USE_DMA) {
-		struct mmc_data *data = mrq->data;
-
-		if (host->use_external_dma && data &&
-		    (mrq->cmd->error || data->error)) {
-			struct dma_chan *chan = sdhci_external_dma_channel(host, data);
-
-			host->mrqs_done[i] = NULL;
-			spin_unlock_irqrestore(&host->lock, flags);
-			dmaengine_terminate_sync(chan);
-			spin_lock_irqsave(&host->lock, flags);
-			sdhci_set_mrq_done(host, mrq);
-		}
-
+	if (host->flags & SDHCI_REQ_USE_DMA)
 		sdhci_request_done_dma(host, mrq);
-	}
 
 	/*
 	 * The controller needs a reset of internal state machines
@@ -1020,7 +850,7 @@ static bool sdhci_uhs2_request_done(struct sdhci_host *host)
 			/* This is to force an update */
 			host->ops->set_clock(host, host->clock);
 
-		host->ops->uhs2_reset(host, SDHCI_UHS2_SW_RESET_SD);
+		sdhci_uhs2_reset(host, SDHCI_UHS2_SW_RESET_SD);
 		host->pending_reset = false;
 	}
 
@@ -1041,6 +871,11 @@ static void sdhci_uhs2_complete_work(struct work_struct *work)
 	struct sdhci_host *host = container_of(work, struct sdhci_host,
 					       complete_work);
 
+	if (!sdhci_uhs2_mode(host)) {
+		sdhci_complete_work(work);
+		return;
+	}
+
 	while (!sdhci_uhs2_request_done(host))
 		;
 }
@@ -1058,7 +893,7 @@ static void __sdhci_uhs2_irq(struct sdhci_host *host, u32 uhs2mask)
 	DBG("*** %s got UHS2 error interrupt: 0x%08x\n",
 	    mmc_hostname(host->mmc), uhs2mask);
 
-	if (uhs2mask & SDHCI_UHS2_ERR_INT_STATUS_CMD_MASK) {
+	if (uhs2mask & SDHCI_UHS2_INT_CMD_ERR_MASK) {
 		if (!host->cmd) {
 			pr_err("%s: Got cmd interrupt 0x%08x but no cmd.\n",
 			       mmc_hostname(host->mmc),
@@ -1067,11 +902,11 @@ static void __sdhci_uhs2_irq(struct sdhci_host *host, u32 uhs2mask)
 			return;
 		}
 		host->cmd->error = -EILSEQ;
-		if (uhs2mask & SDHCI_UHS2_ERR_INT_STATUS_RES_TIMEOUT)
+		if (uhs2mask & SDHCI_UHS2_INT_CMD_TIMEOUT)
 			host->cmd->error = -ETIMEDOUT;
 	}
 
-	if (uhs2mask & SDHCI_UHS2_ERR_INT_STATUS_DATA_MASK) {
+	if (uhs2mask & SDHCI_UHS2_INT_DATA_ERR_MASK) {
 		if (!host->data) {
 			pr_err("%s: Got data interrupt 0x%08x but no data.\n",
 			       mmc_hostname(host->mmc),
@@ -1080,12 +915,12 @@ static void __sdhci_uhs2_irq(struct sdhci_host *host, u32 uhs2mask)
 			return;
 		}
 
-		if (uhs2mask & SDHCI_UHS2_ERR_INT_STATUS_DEADLOCK_TIMEOUT) {
+		if (uhs2mask & SDHCI_UHS2_INT_DEADLOCK_TIMEOUT) {
 			pr_err("%s: Got deadlock timeout interrupt 0x%08x\n",
 			       mmc_hostname(host->mmc),
 			       (unsigned int)uhs2mask);
 			host->data->error = -ETIMEDOUT;
-		} else if (uhs2mask & SDHCI_UHS2_ERR_INT_STATUS_ADMA) {
+		} else if (uhs2mask & SDHCI_UHS2_INT_ADMA_ERROR) {
 			pr_err("%s: ADMA error = 0x %x\n",
 			       mmc_hostname(host->mmc),
 			       sdhci_readb(host, SDHCI_ADMA_ERROR));
@@ -1109,13 +944,13 @@ u32 sdhci_uhs2_irq(struct sdhci_host *host, u32 intmask)
 		goto out;
 
 	if (intmask & SDHCI_INT_ERROR) {
-		uhs2mask = sdhci_readl(host, SDHCI_UHS2_ERR_INT_STATUS);
-		if (!(uhs2mask & SDHCI_UHS2_ERR_INT_STATUS_MASK))
+		uhs2mask = sdhci_readl(host, SDHCI_UHS2_INT_STATUS);
+		if (!(uhs2mask & SDHCI_UHS2_INT_ERROR_MASK))
 			goto cmd_irq;
 
 		/* Clear error interrupts */
-		sdhci_writel(host, uhs2mask & SDHCI_UHS2_ERR_INT_STATUS_MASK,
-			     SDHCI_UHS2_ERR_INT_STATUS);
+		sdhci_writel(host, uhs2mask & SDHCI_UHS2_INT_ERROR_MASK,
+			     SDHCI_UHS2_INT_STATUS);
 
 		/* Handle error interrupts */
 		__sdhci_uhs2_irq(host, uhs2mask);
@@ -1153,6 +988,9 @@ static irqreturn_t sdhci_uhs2_thread_irq(int irq, void *dev_id)
 	struct mmc_command *cmd;
 	unsigned long flags;
 	u32 isr;
+
+	if (!sdhci_uhs2_mode(host))
+		return sdhci_thread_irq(irq, dev_id);
 
 	while (!sdhci_uhs2_request_done(host))
 		;
@@ -1200,7 +1038,7 @@ static int __sdhci_uhs2_add_host_v4(struct sdhci_host *host, u32 caps1)
 
 	max_current_caps2 = sdhci_readl(host, SDHCI_MAX_CURRENT_1);
 
-	if ((caps1 & SDHCI_SUPPORT_VDD2_180) &&
+	if ((caps1 & SDHCI_CAN_VDD2_180) &&
 	    !max_current_caps2 &&
 	    !IS_ERR(mmc->supply.vmmc2)) {
 		/* UHS2 - VDD2 */
@@ -1215,7 +1053,7 @@ static int __sdhci_uhs2_add_host_v4(struct sdhci_host *host, u32 caps1)
 		}
 	}
 
-	if (caps1 & SDHCI_SUPPORT_VDD2_180) {
+	if (caps1 & SDHCI_CAN_VDD2_180) {
 		mmc->ocr_avail_uhs2 |= MMC_VDD2_165_195;
 		/*
 		 * UHS2 doesn't require this. Only UHS-I bus needs to set
@@ -1245,15 +1083,11 @@ static int __sdhci_uhs2_add_host(struct sdhci_host *host)
 		mmc->cqe_ops = NULL;
 	}
 
-	/* overwrite ops */
-	if (mmc->caps2 & MMC_CAP2_SD_UHS2)
-		sdhci_uhs2_host_ops_init(host);
-
 	host->complete_wq = alloc_workqueue("sdhci", flags, 0);
 	if (!host->complete_wq)
 		return -ENOMEM;
 
-	INIT_WORK(&host->complete_work, sdhci_uhs2_complete_work);
+	INIT_WORK(&host->complete_work, host->complete_work_fn);
 
 	timer_setup(&host->timer, sdhci_timeout_timer, 0);
 	timer_setup(&host->data_timer, sdhci_timeout_data_timer, 0);
@@ -1263,7 +1097,7 @@ static int __sdhci_uhs2_add_host(struct sdhci_host *host)
 	sdhci_init(host, 0);
 
 	ret = request_threaded_irq(host->irq, sdhci_irq,
-				   sdhci_uhs2_thread_irq,
+				   host->thread_irq_fn,
 				   IRQF_SHARED,	mmc_hostname(mmc), host);
 	if (ret) {
 		pr_err("%s: Failed to request IRQ %d: %d\n",
@@ -1294,15 +1128,11 @@ unwq:
 
 static void __sdhci_uhs2_remove_host(struct sdhci_host *host, int dead)
 {
-	if (!(host->mmc) || !(host->mmc->flags & MMC_UHS2_SUPPORT))
+	if (!sdhci_uhs2_mode(host))
 		return;
 
 	if (!dead)
-		host->ops->uhs2_reset(host, SDHCI_UHS2_SW_RESET_FULL);
-
-	sdhci_writel(host, 0, SDHCI_UHS2_ERR_INT_STATUS_EN);
-	sdhci_writel(host, 0, SDHCI_UHS2_ERR_INT_SIG_EN);
-	host->mmc->flags &= ~MMC_UHS2_INITIALIZED;
+		sdhci_uhs2_reset(host, SDHCI_UHS2_SW_RESET_FULL);
 }
 
 int sdhci_uhs2_add_host(struct sdhci_host *host)
@@ -1324,6 +1154,13 @@ int sdhci_uhs2_add_host(struct sdhci_host *host)
 		/* host doesn't want to enable UHS2 support */
 		/* FIXME: Do we have to do some cleanup here? */
 		mmc->caps2 &= ~MMC_CAP2_SD_UHS2;
+
+	/* overwrite ops */
+	if (mmc->caps2 & MMC_CAP2_SD_UHS2)
+		sdhci_uhs2_host_ops_init(host);
+
+	host->complete_work_fn = sdhci_uhs2_complete_work;
+	host->thread_irq_fn    = sdhci_uhs2_thread_irq;
 
 	ret = __sdhci_uhs2_add_host(host);
 	if (ret)
@@ -1356,11 +1193,15 @@ void sdhci_uhs2_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	unsigned long flags;
 	bool present;
 
-	/* FIXME: check more flags? */
 	if (!(sdhci_uhs2_mode(host))) {
 		sdhci_request(mmc, mrq);
 		return;
 	}
+
+	mrq->stop = NULL;
+	mrq->sbc = NULL;
+	if (mrq->data)
+		mrq->data->stop = NULL;
 
 	/* Firstly check card presence */
 	present = mmc->ops->get_cd(mmc);
@@ -1442,8 +1283,7 @@ static int sdhci_uhs2_interface_detect(struct sdhci_host *host)
 	}
 
 	/* Enable UHS2 error interrupts */
-	sdhci_uhs2_clear_set_irqs(host, SDHCI_INT_ALL_MASK,
-				  SDHCI_UHS2_ERR_INT_STATUS_MASK);
+	sdhci_uhs2_clear_set_irqs(host, SDHCI_INT_ALL_MASK, SDHCI_UHS2_INT_ERROR_MASK);
 
 	/* 150ms */
 	timeout = 150000;
@@ -1467,45 +1307,29 @@ static int sdhci_uhs2_init(struct sdhci_host *host)
 	u32 caps_tran[2] = {0, 0};
 	struct mmc_host *mmc = host->mmc;
 
-	caps_ptr = sdhci_readw(host, SDHCI_UHS2_HOST_CAPS_PTR);
+	caps_ptr = sdhci_readw(host, SDHCI_UHS2_CAPS_PTR);
 	if (caps_ptr < 0x100 || caps_ptr > 0x1FF) {
-		pr_err("%s: SDHCI_UHS2_HOST_CAPS_PTR(%d) is wrong.\n",
+		pr_err("%s: SDHCI_UHS2_CAPS_PTR(%d) is wrong.\n",
 		       mmc_hostname(mmc), caps_ptr);
 		return -ENODEV;
 	}
-	caps_gen = sdhci_readl(host,
-			       caps_ptr + SDHCI_UHS2_HOST_CAPS_GEN_OFFSET);
-	caps_phy = sdhci_readl(host,
-			       caps_ptr + SDHCI_UHS2_HOST_CAPS_PHY_OFFSET);
-	caps_tran[0] = sdhci_readl(host,
-				   caps_ptr + SDHCI_UHS2_HOST_CAPS_TRAN_OFFSET);
-	caps_tran[1] = sdhci_readl(host,
-				   caps_ptr
-					+ SDHCI_UHS2_HOST_CAPS_TRAN_1_OFFSET);
+	caps_gen = sdhci_readl(host, caps_ptr + SDHCI_UHS2_CAPS_OFFSET);
+	caps_phy = sdhci_readl(host, caps_ptr + SDHCI_UHS2_CAPS_PHY_OFFSET);
+	caps_tran[0] = sdhci_readl(host, caps_ptr + SDHCI_UHS2_CAPS_TRAN_OFFSET);
+	caps_tran[1] = sdhci_readl(host, caps_ptr + SDHCI_UHS2_CAPS_TRAN_1_OFFSET);
 
 	/* General Caps */
-	mmc->uhs2_caps.dap = caps_gen & SDHCI_UHS2_HOST_CAPS_GEN_DAP_MASK;
-	mmc->uhs2_caps.gap = (caps_gen & SDHCI_UHS2_HOST_CAPS_GEN_GAP_MASK) >>
-			     SDHCI_UHS2_HOST_CAPS_GEN_GAP_SHIFT;
-	mmc->uhs2_caps.n_lanes = (caps_gen & SDHCI_UHS2_HOST_CAPS_GEN_LANE_MASK)
-			>> SDHCI_UHS2_HOST_CAPS_GEN_LANE_SHIFT;
-	mmc->uhs2_caps.addr64 =
-		(caps_gen & SDHCI_UHS2_HOST_CAPS_GEN_ADDR_64) ? 1 : 0;
-	mmc->uhs2_caps.card_type =
-		(caps_gen & SDHCI_UHS2_HOST_CAPS_GEN_DEV_TYPE_MASK) >>
-		SDHCI_UHS2_HOST_CAPS_GEN_DEV_TYPE_SHIFT;
+	mmc->uhs2_caps.dap = caps_gen & SDHCI_UHS2_CAPS_DAP_MASK;
+	mmc->uhs2_caps.gap = FIELD_GET(SDHCI_UHS2_CAPS_GAP_MASK, caps_gen);
+	mmc->uhs2_caps.n_lanes = FIELD_GET(SDHCI_UHS2_CAPS_LANE_MASK, caps_gen);
+	mmc->uhs2_caps.addr64 =	(caps_gen & SDHCI_UHS2_CAPS_ADDR_64) ? 1 : 0;
+	mmc->uhs2_caps.card_type = FIELD_GET(SDHCI_UHS2_CAPS_DEV_TYPE_MASK, caps_gen);
 
 	/* PHY Caps */
-	mmc->uhs2_caps.phy_rev = caps_phy & SDHCI_UHS2_HOST_CAPS_PHY_REV_MASK;
-	mmc->uhs2_caps.speed_range =
-		(caps_phy & SDHCI_UHS2_HOST_CAPS_PHY_RANGE_MASK)
-		>> SDHCI_UHS2_HOST_CAPS_PHY_RANGE_SHIFT;
-	mmc->uhs2_caps.n_lss_sync =
-		(caps_phy & SDHCI_UHS2_HOST_CAPS_PHY_N_LSS_SYN_MASK)
-		>> SDHCI_UHS2_HOST_CAPS_PHY_N_LSS_SYN_SHIFT;
-	mmc->uhs2_caps.n_lss_dir =
-		(caps_phy & SDHCI_UHS2_HOST_CAPS_PHY_N_LSS_DIR_MASK)
-		>> SDHCI_UHS2_HOST_CAPS_PHY_N_LSS_DIR_SHIFT;
+	mmc->uhs2_caps.phy_rev = caps_phy & SDHCI_UHS2_CAPS_PHY_REV_MASK;
+	mmc->uhs2_caps.speed_range = FIELD_GET(SDHCI_UHS2_CAPS_PHY_RANGE_MASK, caps_phy);
+	mmc->uhs2_caps.n_lss_sync = FIELD_GET(SDHCI_UHS2_CAPS_PHY_N_LSS_SYN_MASK, caps_phy);
+	mmc->uhs2_caps.n_lss_dir = FIELD_GET(SDHCI_UHS2_CAPS_PHY_N_LSS_DIR_MASK, caps_phy);
 	if (mmc->uhs2_caps.n_lss_sync == 0)
 		mmc->uhs2_caps.n_lss_sync = 16 << 2;
 	else
@@ -1516,21 +1340,13 @@ static int sdhci_uhs2_init(struct sdhci_host *host)
 		mmc->uhs2_caps.n_lss_dir <<= 3;
 
 	/* LINK/TRAN Caps */
-	mmc->uhs2_caps.link_rev =
-		caps_tran[0] & SDHCI_UHS2_HOST_CAPS_TRAN_LINK_REV_MASK;
-	mmc->uhs2_caps.n_fcu =
-		(caps_tran[0] & SDHCI_UHS2_HOST_CAPS_TRAN_N_FCU_MASK)
-		>> SDHCI_UHS2_HOST_CAPS_TRAN_N_FCU_SHIFT;
+	mmc->uhs2_caps.link_rev = caps_tran[0] & SDHCI_UHS2_CAPS_TRAN_LINK_REV_MASK;
+	mmc->uhs2_caps.n_fcu = FIELD_GET(SDHCI_UHS2_CAPS_TRAN_N_FCU_MASK, caps_tran[0]);
 	if (mmc->uhs2_caps.n_fcu == 0)
 		mmc->uhs2_caps.n_fcu = 256;
-	mmc->uhs2_caps.host_type =
-		(caps_tran[0] & SDHCI_UHS2_HOST_CAPS_TRAN_HOST_TYPE_MASK)
-		>> SDHCI_UHS2_HOST_CAPS_TRAN_HOST_TYPE_SHIFT;
-	mmc->uhs2_caps.maxblk_len =
-		(caps_tran[0] & SDHCI_UHS2_HOST_CAPS_TRAN_BLK_LEN_MASK)
-		>> SDHCI_UHS2_HOST_CAPS_TRAN_BLK_LEN_SHIFT;
-	mmc->uhs2_caps.n_data_gap =
-		caps_tran[1] & SDHCI_UHS2_HOST_CAPS_TRAN_1_N_DATA_GAP_MASK;
+	mmc->uhs2_caps.host_type = FIELD_GET(SDHCI_UHS2_CAPS_TRAN_HOST_TYPE_MASK, caps_tran[0]);
+	mmc->uhs2_caps.maxblk_len = FIELD_GET(SDHCI_UHS2_CAPS_TRAN_BLK_LEN_MASK, caps_tran[0]);
+	mmc->uhs2_caps.n_data_gap = caps_tran[1] & SDHCI_UHS2_CAPS_TRAN_1_N_DATA_GAP_MASK;
 
 	return 0;
 }
@@ -1540,7 +1356,7 @@ static int sdhci_uhs2_do_detect_init(struct mmc_host *mmc)
 	struct sdhci_host *host = mmc_priv(mmc);
 	int ret = -EIO;
 
-	DBG("%s: begin UHS2 init.\n", __func__);
+	DBG("Begin do uhs2 detect init.\n");
 
 	if (host->ops && host->ops->uhs2_pre_detect_init)
 		host->ops->uhs2_pre_detect_init(host);
@@ -1557,11 +1373,10 @@ static int sdhci_uhs2_do_detect_init(struct mmc_host *mmc)
 	}
 
 	/* Init complete, do soft reset and enable UHS2 error irqs. */
-	host->ops->uhs2_reset(host, SDHCI_UHS2_SW_RESET_SD);
-	sdhci_uhs2_clear_set_irqs(host, SDHCI_INT_ALL_MASK,
-				  SDHCI_UHS2_ERR_INT_STATUS_MASK);
+	sdhci_uhs2_reset(host, SDHCI_UHS2_SW_RESET_SD);
+	sdhci_uhs2_clear_set_irqs(host, SDHCI_INT_ALL_MASK, SDHCI_UHS2_INT_ERROR_MASK);
 	/*
-	 * !!! SDHCI_INT_ENABLE and SDHCI_SIGNAL_ENABLE was cleared
+	 * N.B SDHCI_INT_ENABLE and SDHCI_SIGNAL_ENABLE was cleared
 	 * by SDHCI_UHS2_SW_RESET_SD
 	 */
 	sdhci_writel(host, host->ier, SDHCI_INT_ENABLE);
@@ -1580,13 +1395,6 @@ static int sdhci_uhs2_host_ops_init(struct sdhci_host *host)
 	host->mmc_host_ops.uhs2_control = sdhci_uhs2_control;
 	host->mmc_host_ops.request = sdhci_uhs2_request;
 
-	if (!host->mmc_host_ops.uhs2_detect_init)
-		host->mmc_host_ops.uhs2_detect_init = sdhci_uhs2_do_detect_init;
-	if (!host->mmc_host_ops.uhs2_disable_clk)
-		host->mmc_host_ops.uhs2_disable_clk = sdhci_uhs2_disable_clk;
-	if (!host->mmc_host_ops.uhs2_enable_clk)
-		host->mmc_host_ops.uhs2_enable_clk = sdhci_uhs2_enable_clk;
-
 	return 0;
 }
 
@@ -1596,10 +1404,10 @@ static int __init sdhci_uhs2_mod_init(void)
 }
 module_init(sdhci_uhs2_mod_init);
 
-static void __exit sdhci_uhs2_exit(void)
+static void __exit sdhci_uhs2_mod_exit(void)
 {
 }
-module_exit(sdhci_uhs2_exit);
+module_exit(sdhci_uhs2_mod_exit);
 
 MODULE_AUTHOR("Intel, Genesys Logic, Linaro");
 MODULE_DESCRIPTION("MMC UHS-II Support");

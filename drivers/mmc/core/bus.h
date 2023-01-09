@@ -30,10 +30,6 @@ void mmc_remove_card(struct mmc_card *card);
 int mmc_register_bus(void);
 void mmc_unregister_bus(void);
 
-/* 
-mmc driver是通用抽象的mmc_card驱动，能做到通用是因为所有的mmc card的命令格式、状态流转、寄存器定义等操作都由Spec定义规则
-mmc_driver的具体实例在block.c的mmc_blk_XXX实现 
-*/
 struct mmc_driver {
 	struct device_driver drv;
 	int (*probe)(struct mmc_card *card);

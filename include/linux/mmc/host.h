@@ -18,8 +18,6 @@
 #include <linux/blk-crypto-profile.h>
 #include <linux/mmc/sd_uhs2.h>
 
-/* 定义mmc host和card之间的I/O接口的参数，主要包括时钟频率、电源、总线模式和带宽、信号电压
-通过mmc_host_ops->set_ios方法设置 */
 struct mmc_ios {
 	unsigned int	clock;			/* clock rate */
 	unsigned short	vdd;
@@ -176,10 +174,6 @@ struct mmc_host_ops {
 	void	(*post_req)(struct mmc_host *host, struct mmc_request *req,
 			    int err);
 	void	(*pre_req)(struct mmc_host *host, struct mmc_request *req);
-	/* 
-	定义mmc controller向mmc card的通信方法，具体的request由底层回调实现，参考sdhci_request
-	mmc层的req在底层回调转化成具体的SD/MMC command 发送给卡
- 	*/
 	void	(*request)(struct mmc_host *host, struct mmc_request *req);
 	/* Submit one request to host in atomic context. */
 	int	(*request_atomic)(struct mmc_host *host,
@@ -199,7 +193,6 @@ struct mmc_host_ops {
 	 * explicitly need to disable the clock. Otherwise e.g. voltage
 	 * switching might fail because the SDCLK is not really quiet.
 	 */
-	/* io接口设置，供给卡的时钟，电压，总线位宽，速率等都在此设置 */
 	void	(*set_ios)(struct mmc_host *host, struct mmc_ios *ios);
 
 	/*
@@ -220,7 +213,6 @@ struct mmc_host_ops {
 	 *   -ENOSYS when not supported (equal to NULL callback)
 	 *   or a negative errno value when something bad happened
 	 */
-	/* 卡是否只读检测 */
 	int	(*get_ro)(struct mmc_host *host);
 
 	/*
@@ -230,7 +222,6 @@ struct mmc_host_ops {
 	 *   -ENOSYS when not supported (equal to NULL callback)
 	 *   or a negative errno value when something bad happened
 	 */
-	/* 卡在位检测 */
 	int	(*get_cd)(struct mmc_host *host);
 
 	void	(*enable_sdio_irq)(struct mmc_host *host, int enable);
@@ -238,7 +229,6 @@ struct mmc_host_ops {
 	void	(*ack_sdio_irq)(struct mmc_host *host);
 
 	/* optional callback for HC quirks */
-	/* 可选的自定义(quirk)的SDHC卡初始化的接口，不是通用SDHC初始化接口，参考mmc_attach_sd */
 	void	(*init_card)(struct mmc_host *host, struct mmc_card *card);
 
 	int	(*start_signal_voltage_switch)(struct mmc_host *host, struct mmc_ios *ios);
@@ -282,16 +272,7 @@ struct mmc_host_ops {
 				  unsigned int direction, int blk_size);
 
 	/* Initialize an SD express card, mandatory for MMC_CAP2_SD_EXP. */
-	/* SD 7.0 (SD express) 卡的初始化入口 */
 	int	(*init_sd_express)(struct mmc_host *host, struct mmc_ios *ios);
-
-	/* UHS2 interfaces */
-	/* SD 4.0 (UHS2) 卡的初始化入口 */
-	int	(*uhs2_detect_init)(struct mmc_host *host);
-	int	(*uhs2_set_reg)(struct mmc_host *host, enum sd_uhs2_operation act);
-	int (*uhs2_disable_clk)(struct mmc_host *host);
-	int (*uhs2_enable_clk)(struct mmc_host *host);
-	void (*uhs2_post_attach_sd)(struct mmc_host *host);
 
 	/*
 	 * The uhs2_control callback is used to execute SD UHS-II specific
@@ -401,37 +382,21 @@ struct mmc_ctx {
 	struct task_struct *task;
 };
 
-/* 
-mmc_host描述mmc host controller的属性、方法以及其关联的上下游
-mmc_host_ops：该mmc controller的自身属性的配置，以及对卡操作的一些方法的集合，例如set_ios, request
-mmc_bus_ops：mmc controller针对mmc card的detect/remove, sleep/awake等方法的集合，类似硬件bus对其挂载设备的操作
-mmc_ios：mmc_host和卡之间io通信的属性的描述，clock，voltage，timing等io属性
-mmc_card：mmc host相关联的卡的数据结构
- */
 struct mmc_host {
-	/* 指向父设备，一般是创建该mmc_host的platform device抽象设备 */
 	struct device		*parent;
-	/* 该host的class_device设备，属于mmc_host_class类 */
 	struct device		class_dev;
-	/* 设备id, 区分多个mmc设备 */
 	int			index;
 	const struct mmc_host_ops *ops;
-	/* 专门管理开关电流程的一些操作方法 */
 	struct mmc_pwrseq	*pwrseq;
-	/* 支持的时钟频率的范围和初始值 */
 	unsigned int		f_min;
 	unsigned int		f_max;
 	unsigned int		f_init;
-	/* host可以访问card的ocr register得到详细的电压配置 
-	具体值参考下面的宏 MMC_VDD_165_195 ~ MMC_VDD_35_36
-	*/
 	u32			ocr_avail;
 	u32			ocr_avail_sdio;	/* SDIO-specific OCR */
 	u32			ocr_avail_sd;	/* SD-specific OCR */
 	u32			ocr_avail_mmc;	/* MMC-specific OCR */
 	u32			ocr_avail_uhs2; /* UHS2-specific OCR */
 	struct wakeup_source	*ws;		/* Enable consume of uevents */
-	/* 各种电压配置下的最大电流值 */
 	u32			max_current_330;
 	u32			max_current_300;
 	u32			max_current_180;
@@ -455,7 +420,7 @@ struct mmc_host {
 #define MMC_VDD_34_35		0x00400000	/* VDD voltage 3.4 ~ 3.5 */
 #define MMC_VDD_35_36		0x00800000	/* VDD voltage 3.5 ~ 3.6 */
 #define MMC_VDD2_165_195	0x00000080	/* UHS2 VDD2 1.65 ~ 1.95 */
-	/* host的能力register，具体值参考下面的宏 */
+
 	u32			caps;		/* Host capabilities */
 
 #define MMC_CAP_4_BIT_DATA	(1 << 0)	/* Can the host do 4 bit transfers */
@@ -534,8 +499,7 @@ struct mmc_host {
 
 	int flags;
 #define MMC_UHS2_SUPPORT	(1 << 0)
-#define MMC_UHS2_2L_HD		(1 << 2)
-	/* 定义uhs2特有的capability和ios */
+
 	struct sd_uhs2_caps	uhs2_caps;	/* Host UHS-II capabilities */
 	struct sd_uhs2_ios	uhs2_ios;	/* Host UHS-II capabilities */
 

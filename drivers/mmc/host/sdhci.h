@@ -44,9 +44,7 @@
 #define  SDHCI_TRNS_MULTI	0x20
 
 /*
- * Defined in Host Version 4.10.
- * 1 - R5 (SDIO)
- * 0 - R1 (Memory)
+ * Defined in Host Version 4.0.
  */
 #define  SDHCI_TRNS_RES_TYPE		0x40
 #define  SDHCI_TRNS_RES_ERR_CHECK	0x80
@@ -58,9 +56,7 @@
 /*
  * Host Version 4.10 adds this bit to distinguish a main command or
  * sub command.
- * CMD53(SDIO) - main command
- * CMD52(SDIO) - sub command which doesn't have data block or doesn't
- * indicate busy.
+ * For example with SDIO, CMD52 (sub command) issued during CMD53 (main command).
  */
 #define  SDHCI_CMD_SUB_CMD	0x04
 
@@ -79,18 +75,13 @@
 
 #define SDHCI_RESPONSE		0x10
 
-#define  SDHCI_RESPONSE_CM_TRAN_ABORT_OFFSET	0x10
-#define  SDHCI_RESPONSE_CM_TRAN_ABORT_SIZE	4
-#define  SDHCI_RESPONSE_SD_TRAN_ABORT_OFFSET	0x18
-#define  SDHCI_RESPONSE_SD_TRAN_ABORT_SIZE	8
-
 #define SDHCI_BUFFER		0x20
 
 #define SDHCI_PRESENT_STATE	0x24
 #define  SDHCI_CMD_INHIBIT	0x00000001
 #define  SDHCI_DATA_INHIBIT	0x00000002
 
-#define  SDHCI_DATA_HIGH_LVL_MASK	0x000000F0
+#define  SDHCI_DAT_4_TO_7_LVL_MASK	0x000000F0
 
 #define  SDHCI_DOING_WRITE	0x00000100
 #define  SDHCI_DOING_READ	0x00000200
@@ -107,8 +98,10 @@
 #define   SDHCI_DATA_0_LVL_MASK	0x00100000
 #define  SDHCI_CMD_LVL		0x01000000
 
+/* Host Version 4.10 */
+
 #define  SDHCI_HOST_REGULATOR_STABLE	0x02000000
-#define  SDHCI_CMD_NOT_ISSUE_ERR	0x08000000
+#define  SDHCI_CMD_NOT_ISSUED_ERR	0x08000000
 #define  SDHCI_SUB_CMD_STATUS		0x10000000
 #define  SDHCI_UHS2_IN_DORMANT_STATE	0x20000000
 #define  SDHCI_UHS2_LANE_SYNC		0x40000000
@@ -134,10 +127,13 @@
 #define  SDHCI_POWER_300	0x0C
 #define  SDHCI_POWER_330	0x0E
 
-/* VDD2 - UHS2 */
+/*
+ * VDD2 - UHS2
+ * VDD2 power on/off and voltage select (UHS2)
+ */
 #define  SDHCI_VDD2_POWER_ON		0x10
-#define  SDHCI_VDD2_POWER_180		0xA0
 #define  SDHCI_VDD2_POWER_120		0x80
+#define  SDHCI_VDD2_POWER_180		0xA0
 
 #define SDHCI_BLOCK_GAP_CONTROL	0x2A
 
@@ -196,7 +192,7 @@
 #define  SDHCI_INT_ADMA_ERROR	0x02000000
 
 /* Host Version 4.0 */
-#define  SDHCI_INT_RESPONSE_ERROR	0x08000000
+#define  SDHCI_INT_RESP_ERR	0x08000000
 
 #define  SDHCI_INT_NORMAL_MASK	0x00007FFF
 #define  SDHCI_INT_ERROR_MASK	0xFFFF8000
@@ -225,7 +221,7 @@
 #define  SDHCI_AUTO_CMD_INDEX	0x00000010
 
 /* Host Version 4.10 */
-#define  SDHCI_ACMD_RESPONSE_ERROR	0x0020
+#define  SDHCI_AUTO_CMD_RESP_ERR	0x0020
 
 #define SDHCI_HOST_CONTROL2		0x3E
 #define  SDHCI_CTRL_UHS_MASK		0x0007
@@ -235,7 +231,7 @@
 #define   SDHCI_CTRL_UHS_SDR104		0x0003
 #define   SDHCI_CTRL_UHS_DDR50		0x0004
 #define   SDHCI_CTRL_HS400		0x0005 /* Non-standard */
-#define   SDHCI_CTRL_UHS_2		0x0007 /* UHS-2 */
+#define   SDHCI_CTRL_UHS2		0x0007
 #define  SDHCI_CTRL_VDD_180		0x0008
 #define  SDHCI_CTRL_DRV_TYPE_MASK	0x0030
 #define   SDHCI_CTRL_DRV_TYPE_B		0x0000
@@ -244,12 +240,12 @@
 #define   SDHCI_CTRL_DRV_TYPE_D		0x0030
 #define  SDHCI_CTRL_EXEC_TUNING		0x0040
 #define  SDHCI_CTRL_TUNED_CLK		0x0080
-#define  SDHCI_CTRL_UHS2_INTERFACE_EN	0x0100 /* UHS-2 */
+#define  SDHCI_CTRL_UHS2_ENABLE		0x0100
 #define  SDHCI_CTRL_ADMA2_LEN_MODE	0x0400
 #define  SDHCI_CMD23_ENABLE		0x0800
 #define  SDHCI_CTRL_V4_MODE		0x1000
 #define  SDHCI_CTRL_64BIT_ADDR		0x2000
-#define  SDHCI_CTRL_ASYNC_INT_EN	0x4000
+#define  SDHCI_CTRL_ASYNC_INT_ENABLE	0x4000
 #define  SDHCI_CTRL_PRESET_VAL_ENABLE	0x8000
 
 #define SDHCI_CAPABILITIES	0x40
@@ -278,7 +274,7 @@
 #define  SDHCI_SUPPORT_SDR50	0x00000001
 #define  SDHCI_SUPPORT_SDR104	0x00000002
 #define  SDHCI_SUPPORT_DDR50	0x00000004
-#define  SDHCI_SUPPORT_UHS2	0x00000008 /* UHS-2 support */
+#define  SDHCI_SUPPORT_UHS2	0x00000008
 #define  SDHCI_DRIVER_TYPE_A	0x00000010
 #define  SDHCI_DRIVER_TYPE_C	0x00000020
 #define  SDHCI_DRIVER_TYPE_D	0x00000040
@@ -287,16 +283,15 @@
 #define  SDHCI_RETUNING_MODE_MASK		GENMASK(15, 14)
 #define  SDHCI_CLOCK_MUL_MASK			GENMASK(23, 16)
 #define  SDHCI_CAN_DO_ADMA3	0x08000000
-#define  SDHCI_SUPPORT_VDD2_180	0x10000000 /* UHS-2 1.8V VDD2 */
-#define  SDHCI_RSVD_FOR_VDD2    0x20000000 /* Rsvd for future VDD2 */
+#define  SDHCI_CAN_VDD2_180	0x10000000 /* UHS-2 1.8V VDD2 */
 #define  SDHCI_SUPPORT_HS400	0x80000000 /* Non-standard */
 
 #define SDHCI_MAX_CURRENT		0x48
-#define SDHCI_MAX_CURRENT_1		0x4C
 #define  SDHCI_MAX_CURRENT_LIMIT	GENMASK(7, 0)
 #define  SDHCI_MAX_CURRENT_330_MASK	GENMASK(7, 0)
 #define  SDHCI_MAX_CURRENT_300_MASK	GENMASK(15, 8)
 #define  SDHCI_MAX_CURRENT_180_MASK	GENMASK(23, 16)
+#define SDHCI_MAX_CURRENT_1		0x4C
 #define  SDHCI_MAX_CURRENT_VDD2_180_MASK	GENMASK(7, 0) /* UHS2 */
 #define   SDHCI_MAX_CURRENT_MULTIPLIER	4
 
@@ -304,11 +299,7 @@
 
 #define SDHCI_SET_ACMD12_ERROR	0x50
 /* Host Version 4.10 */
-#define SDHCI_SET_ACMD_RESPONSE_ERROR	0x20
 #define SDHCI_SET_INT_ERROR	0x52
-/* Host Version 4.10 */
-#define SDHCI_SET_INT_TUNING_ERROR	0x0400
-#define SDHCI_SET_INT_RESPONSE_ERROR	0x0800
 
 #define SDHCI_ADMA_ERROR	0x54
 
@@ -327,7 +318,6 @@
 #define SDHCI_PRESET_FOR_DDR50 0x6E
 #define SDHCI_PRESET_FOR_HS400 0x74 /* Non-standard */
 
-/* TODO: 0x74 is used for UHS2 in 4.10. How about HS400? */
 /* UHS2 */
 #define SDHCI_PRESET_FOR_UHS2  0x74
 #define SDHCI_PRESET_DRV_MASK		GENMASK(15, 14)
@@ -594,6 +584,8 @@ struct sdhci_host {
 
 	unsigned int clock;	/* Current clock (MHz) */
 	u8 pwr;			/* Current voltage */
+	u8 drv_type;		/* Current UHS-I driver type */
+	bool reinit_uhs;	/* Force UHS-related re-initialization */
 
 	bool runtime_suspended;	/* Host is runtime suspended */
 	bool bus_on;		/* Bus power prevents runtime suspend */
@@ -634,6 +626,9 @@ struct sdhci_host {
 
 	struct timer_list timer;	/* Timer for timeouts */
 	struct timer_list data_timer;	/* Timer for data timeouts */
+
+	void		(*complete_work_fn)(struct work_struct *work);
+	irqreturn_t	(*thread_irq_fn)(int irq, void *dev_id);
 
 #if IS_ENABLED(CONFIG_MMC_SDHCI_EXTERNAL_DMA)
 	struct dma_chan *rx_chan;
@@ -715,19 +710,6 @@ struct sdhci_ops {
 					     u8 power_mode);
 	unsigned int    (*get_ro)(struct sdhci_host *host);
 	void		(*reset)(struct sdhci_host *host, u8 mask);
-	/**
-	 * The sdhci_uhs2_reset callback is to implement for reset
-	 * @host: SDHCI host
-	 * @mask: Control mask
-	 *
-	 * Invoke reset, depending on a bit in @mask and wait for completion.
-	 * SD mode				UHS-II mode
-	 * SDHCI_RESET_ALL		SDHCI_UHS2_SW_RESET_FULL
-	 * SDHCI_RESET_CMD		SDHCI_RESET_CMD
-	 * SDHCI_RESET_DATA		SDHCI_UHS2_SW_RESET_SD
-	 *
-	 **/
-	void (*uhs2_reset)(struct sdhci_host *host, u16 mask);
 	int	(*platform_execute_tuning)(struct sdhci_host *host, u32 opcode);
 	void	(*set_uhs_signaling)(struct sdhci_host *host, unsigned int uhs);
 	void	(*hw_reset)(struct sdhci_host *host);
@@ -854,8 +836,6 @@ static inline void sdhci_read_caps(struct sdhci_host *host)
 
 bool sdhci_data_line_cmd(struct mmc_command *cmd);
 void sdhci_enable_card_detection(struct sdhci_host *host);
-void sdhci_runtime_pm_bus_on(struct sdhci_host *host);
-void sdhci_runtime_pm_bus_off(struct sdhci_host *host);
 void sdhci_init(struct sdhci_host *host, int soft);
 #if IS_REACHABLE(CONFIG_LEDS_CLASS)
 int sdhci_led_register(struct sdhci_host *host);
@@ -871,14 +851,11 @@ void __sdhci_external_dma_prepare_data(struct sdhci_host *host, struct mmc_comma
 void sdhci_external_dma_pre_transfer(struct sdhci_host *host, struct mmc_command *cmd);
 struct dma_chan *sdhci_external_dma_channel(struct sdhci_host *host, struct mmc_data *data);
 #endif
-bool sdhci_manual_cmd23(struct sdhci_host *host, struct mmc_request *mrq);
 bool sdhci_needs_reset(struct sdhci_host *host, struct mmc_request *mrq);
 void sdhci_set_mrq_done(struct sdhci_host *host, struct mmc_request *mrq);
 void __sdhci_finish_mrq(struct sdhci_host *host, struct mmc_request *mrq);
 void sdhci_finish_mrq(struct sdhci_host *host, struct mmc_request *mrq);
 void __sdhci_finish_data_common(struct sdhci_host *host);
-bool sdhci_send_command(struct sdhci_host *host, struct mmc_command *cmd);
-void sdhci_finish_command(struct sdhci_host *host);
 bool sdhci_present_error(struct sdhci_host *host, struct mmc_command *cmd, bool present);
 u16 sdhci_calc_clk(struct sdhci_host *host, unsigned int clock,
 		   unsigned int *actual_clock);
@@ -897,7 +874,6 @@ void sdhci_request(struct mmc_host *mmc, struct mmc_request *mrq);
 int sdhci_request_atomic(struct mmc_host *mmc, struct mmc_request *mrq);
 void sdhci_set_bus_width(struct sdhci_host *host, int width);
 void sdhci_reset(struct sdhci_host *host, u8 mask);
-void sdhci_clear_set_irqs(struct sdhci_host *host, u32 clear, u32 set);
 void sdhci_set_uhs_signaling(struct sdhci_host *host, unsigned timing);
 int sdhci_execute_tuning(struct mmc_host *mmc, u32 opcode);
 void sdhci_enable_preset_value(struct sdhci_host *host, bool enable);
@@ -907,10 +883,11 @@ int sdhci_start_signal_voltage_switch(struct mmc_host *mmc,
 				      struct mmc_ios *ios);
 void sdhci_enable_sdio_irq(struct mmc_host *mmc, int enable);
 void sdhci_request_done_dma(struct sdhci_host *host, struct mmc_request *mrq);
-bool sdhci_request_done(struct sdhci_host *host);
+void sdhci_complete_work(struct work_struct *work);
 void sdhci_timeout_timer(struct timer_list *t);
 void sdhci_timeout_data_timer(struct timer_list *t);
 irqreturn_t sdhci_irq(int irq, void *dev_id);
+irqreturn_t sdhci_thread_irq(int irq, void *dev_id);
 void sdhci_adma_write_desc(struct sdhci_host *host, void **desc,
 			   dma_addr_t addr, int len, unsigned int cmd);
 
